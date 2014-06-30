@@ -7,7 +7,7 @@
 
 DOBENCHMARK=0
 BENCHMARKITER=30
-OPENSSLBIN="$(dirname $0)/openssl"
+OPENSSLBIN="/usr/local/bin/openssl/openssl"
 CACERTS=${CACERTS:-/etc/pki/tls/certs/ca-bundle.crt}
 if [ ! -e "$CACERTS" ]; then
     echo "Warning: CA Certificates not found at $CACERTS, export CACERTS variable with location of your trust anchors" 1>&2
