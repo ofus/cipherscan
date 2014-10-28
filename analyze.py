@@ -10,6 +10,26 @@ from collections import namedtuple
 from datetime import datetime
 from copy import deepcopy
 
+# has_good_pfs compares a given PFS configuration with a target
+# dh parameter a target elliptic curve, and return true if good
+# if `must_match` is True, the exact values are expected, if not
+# larger pfs values than the targets are acceptable
+def has_good_pfs(pfs, target_dh, target_ecc, must_match=False):
+    if 'ECDH,' in pfs:
+        # split string, expected format is 'ECDH,P-256,256bits'
+        ecc = pfs.split(',')[2].split('b')[0]
+        if int(ecc) < target_ecc:
+            return False
+        if must_match and int(ecc) != target_ecc:
+            return False
+    elif 'DH,' in pfs:
+        dhparam = pfs.split(',')[1].split('b')[0]
+        if int(dhparam) < target_dh:
+            return False
+        if must_match and int(dhparam) != target_dh:
+            return False
+    return True
+
 # is_fubar assumes that a configuration is not completely messed up
 # and looks for reasons to think otherwise. it will return True if
 # it finds one of these reason
@@ -20,6 +40,7 @@ def is_fubar(results):
     has_wrong_pubkey = False
     has_md5_sig = False
     has_untrust_cert = False
+    has_wrong_pfs = False
     fubar_ciphers = set(all_ciphers) - set(old_ciphers)
     for conn in results['ciphersuite']:
         if conn['cipher'] in fubar_ciphers:
@@ -34,6 +55,11 @@ def is_fubar(results):
             has_wrong_pubkey = True
             logging.debug(conn['pubkey'] + ' is a fubar pubkey size')
             fubar = True
+        if conn['pfs'] != 'None':
+            if not has_good_pfs(conn['pfs'], 1024, 160):
+                logging.debug(conn['pfs']+ ' is a fubar PFS parameters')
+                fubar = True
+                has_wrong_pfs = True
         if 'md5WithRSAEncryption' in conn['sigalg']:
             has_md5_sig = True
             logging.debug(conn['sigalg']+ ' is a fubar cert signature')
@@ -50,6 +76,8 @@ def is_fubar(results):
         failures[lvl].append("don't use a public key smaller than 2048 bits")
     if has_untrust_cert:
         failures[lvl].append("don't use an untrusted or self-signed certificate")
+    if has_wrong_pfs:
+        failures[lvl].append("don't use DHE smaller than 1024bits or ECC smaller than 160bits")
     return fubar
 
 # is_old assumes a configuration *is* old, and will return False if
@@ -61,7 +89,7 @@ def is_old(results):
     has_sslv3 = False
     has_3des = False
     has_sha1 = True
-    has_dhparam = True
+    has_pfs = True
     has_ocsp = True
     all_proto = []
     for conn in results['ciphersuite']:
@@ -85,11 +113,11 @@ def is_old(results):
             old = False
             has_sha1 = False
         # verify required pfs parameter is used
-        if conn['cipher'][0:2] == 'DHE':
-            if conn['pfs'] != 'DH,1024bits':
-                logging.debug(conn['pfs']+ ' is not a good DH parameters for the old configuration')
+        if conn['pfs'] != 'None':
+            if not has_good_pfs(conn['pfs'], 1024, 256, True):
+                logging.debug(conn['pfs']+ ' is not a good PFS parameter for the old configuration')
                 old = False
-                has_dhparam = False
+                has_pfs = False
         if conn['ocsp_stapling'] == 'False':
             has_ocsp = False
     extra_proto = set(all_proto) - set(['SSLv3', 'TLSv1', 'TLSv1.1', 'TLSv1.2'])
@@ -111,8 +139,8 @@ def is_old(results):
     if not has_sha1:
         failures[lvl].append("use a certificate with sha1WithRSAEncryption signature")
         old = False
-    if not has_dhparam:
-        failures[lvl].append("use a DH parameter of 1024 bits")
+    if not has_pfs:
+        failures[lvl].append("use DHE of 1024bits and ECC of 256bits")
         old = False
     if not has_ocsp:
         failures[lvl].append("consider enabling OCSP Stapling")
@@ -127,7 +155,7 @@ def is_intermediate(results):
     inter = True
     has_tls1 = False
     has_aes = False
-    has_dhparam = True
+    has_pfs = True
     has_sha256 = True
     has_ocsp = True
     all_proto = []
@@ -143,21 +171,20 @@ def is_intermediate(results):
                 all_proto.append(proto)
         if 'TLSv1' in conn['protocols']:
             has_tls1 = True
-        if 'sha256WithRSAEncryption' not in conn['sigalg']:
+        if conn['sigalg'][0] not in ['sha256WithRSAEncryption', 'sha384WithRSAEncryption', 'sha512WithRSAEncryption']:
             logging.debug(conn['sigalg'][0] + ' is a not an intermediate signature')
             has_sha256 = False
-        if conn['cipher'][0:2] == 'DHE':
-            if conn['pfs'] != 'DH,2048bits':
-                logging.debug(conn['pfs']+ ' is not a good DH parameters for the old configuration')
-                inter = False
-                has_dhparam = False
+        if conn['pfs'] != 'None':
+            if not has_good_pfs(conn['pfs'], 2048, 256):
+                logging.debug(conn['pfs']+ ' is not a good PFS parameter for the intermediate configuration')
+                has_pfs = False
         if conn['ocsp_stapling'] == 'False':
             has_ocsp = False
     extra_proto = set(all_proto) - set(['TLSv1', 'TLSv1.1', 'TLSv1.2'])
     for proto in extra_proto:
         logging.debug("found protocol not wanted in the intermediate configuration:" + proto)
         failures[lvl].append('disable ' + proto)
-        modern = False
+        inter = False
     missing_proto = set(['TLSv1', 'TLSv1.1', 'TLSv1.2']) - set(all_proto)
     for proto in missing_proto:
         logging.debug("missing protocol wanted in the intermediate configuration:" + proto)
@@ -171,9 +198,8 @@ def is_intermediate(results):
         inter = False
     if not has_sha256:
         failures[lvl].append("consider using a SHA-256 certificate")
-    if not has_dhparam:
-        failures[lvl].append("use a DH parameter of 2048 bits")
-        inter = False
+    if not has_pfs:
+        failures[lvl].append("consider using DHE of at least 2048bits and ECC of at least 256bits")
     if not has_ocsp:
         failures[lvl].append("consider enabling OCSP Stapling")
     if results['serverside'] != 'True':
@@ -185,7 +211,7 @@ def is_intermediate(results):
 def is_modern(results):
     lvl = 'modern'
     modern = True
-    has_dhparam = True
+    has_pfs = True
     has_sha256 = True
     has_ocsp = True
     all_proto = []
@@ -197,15 +223,15 @@ def is_modern(results):
         for proto in conn['protocols']:
             if proto not in all_proto:
                 all_proto.append(proto)
-        if 'sha256WithRSAEncryption' not in conn['sigalg']:
-            logging.debug(conn['sigalg'][0] + ' is a not an intermediate signature')
-            inter = False
+        if conn['sigalg'][0] not in ['sha256WithRSAEncryption', 'sha384WithRSAEncryption', 'sha512WithRSAEncryption']:
+            logging.debug(conn['sigalg'][0] + ' is a not an modern signature')
+            modern = False
             has_sha256 = False
-        if conn['cipher'][0:2] == 'DHE':
-            if conn['pfs'] != 'DH,2048bits':
-                logging.debug(conn['pfs']+ ' is not a good DH parameters for the old configuration')
-                inter = False
-                has_dhparam = False
+        if conn['pfs'] != 'None':
+            if not has_good_pfs(conn['pfs'], 2048, 256):
+                logging.debug(conn['pfs']+ ' is not a good PFS parameter for the modern configuration')
+                modern = False
+                has_pfs = False
         if conn['ocsp_stapling'] == 'False':
             has_ocsp = False
     extra_proto = set(all_proto) - set(['TLSv1.1', 'TLSv1.2'])
@@ -220,8 +246,8 @@ def is_modern(results):
     if not has_sha256:
         failures[lvl].append("use a SHA-256 certificate")
         modern = False
-    if not has_dhparam:
-        failures[lvl].append("use a DH parameter of 2048 bits")
+    if not has_pfs:
+        failures[lvl].append("use DHE of at least 2048bits and ECC of at least 256bits")
         modern = False
     if not has_ocsp:
         failures[lvl].append("consider enabling OCSP Stapling")
@@ -308,7 +334,13 @@ def process_results(data, level=None, do_json=False):
                 if operator:
                     json_output['operator'] = operator
             else:
-                print(results['target'] + " has " + evaluate_all(results) + " ssl/tls")
+                measured_lvl = evaluate_all(results)
+                print(results['target'] + " has " + measured_lvl + " ssl/tls")
+                if level != 'none':
+                    if level in measured_lvl:
+                        print("and complies with the '" + level + "' level")
+                    else:
+                        print("and DOES NOT comply with the '" + level + "' level")
     except TypeError, e:
         return False
 
@@ -318,7 +350,7 @@ def process_results(data, level=None, do_json=False):
         return True
 
     if len(failures['fubar']) > 0:
-        print("\nThings that are really FUBAR:")
+        print("\nThings that are bad:")
         for failure in failures['fubar']:
             print("* " + failure)
 
@@ -347,18 +379,18 @@ def build_ciphers_lists(opensslbin):
            '384:ECDHE-RSA-AES256-SHA:ECDHE-ECDSA-AES256-SHA:DHE-RSA-AES128-SHA256:DHE-RSA-AE' \
            'S128-SHA:DHE-DSS-AES128-SHA256:DHE-RSA-AES256-SHA256:DHE-DSS-AES256-SHA:DHE-RSA-' \
            'AES256-SHA:ECDHE-RSA-DES-CBC3-SHA:ECDHE-ECDSA-DES-CBC3-SHA:AES128-GCM-SHA256:AES' \
-           '256-GCM-SHA384:AES128:AES256:AES:DES-CBC3-SHA:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!R' \
-           'C4:!MD5:!PSK:!aECDH:!EDH-DSS-DES-CBC3-SHA:!EDH-RSA-DES-CBC3-SHA:!KRB5-DES-CBC3-S' \
-           'HA'
+           '256-GCM-SHA384:AES128-SHA256:AES256-SHA256:AES128-SHA:AES256-SHA:AES:DES-CBC3-SH' \
+           'A:HIGH:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!aECDH:!EDH-DSS-DES-CBC3-SHA:!E' \
+           'DH-RSA-DES-CBC3-SHA:!KRB5-DES-CBC3-SHA'
     intC = 'ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-S' \
            'HA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-DSS-AES128-GCM' \
            '-SHA256:kEDH+AESGCM:ECDHE-RSA-AES128-SHA256:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-' \
            'AES128-SHA:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES256-SHA' \
            '384:ECDHE-RSA-AES256-SHA:ECDHE-ECDSA-AES256-SHA:DHE-RSA-AES128-SHA256:DHE-RSA-AE' \
            'S128-SHA:DHE-DSS-AES128-SHA256:DHE-RSA-AES256-SHA256:DHE-DSS-AES256-SHA:DHE-RSA-' \
-           'AES256-SHA:AES128-GCM-SHA256:AES256-GCM-SHA384:AES128:AES256:AES:CAMELLIA!aNULL:' \
-           '!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!aECDH:!EDH-DSS-DES-CBC3-SHA:!EDH-RSA-DES-CBC' \
-           '3-SHA:!KRB5-DES-CBC3-SHA'
+           'AES256-SHA:AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA256:AES256-SHA256:AES12' \
+           '8-SHA:AES256-SHA:AES:CAMELLIA:DES-CBC3-SHA:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:' \
+           '!PSK:!aECDH:!EDH-DSS-DES-CBC3-SHA:!EDH-RSA-DES-CBC3-SHA:!KRB5-DES-CBC3-SHA'
     modernC = 'ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-S' \
               'HA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:DHE-DSS-AES128-GCM' \
               '-SHA256:kEDH+AESGCM:ECDHE-RSA-AES128-SHA256:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-' \
