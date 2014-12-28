@@ -10,7 +10,20 @@
 
 DOBENCHMARK=0
 BENCHMARKITER=30
-OPENSSLBIN="$(dirname $0)/openssl"
+REALPATH=$(dirname $0)
+# make sure this doesn't error out when readlink -f isn't available (OSX)
+readlink -f $0 &>/dev/null && REALPATH=$(dirname $(readlink -f $0))
+OPENSSLBIN="${REALPATH}/openssl"
+if [ "$(uname -s)" == "Darwin" ]; then
+    OPENSSLBIN="${REALPATH}/openssl-darwin64"
+fi
+
+# cipherscan requires bash4, which doesn't come by default in OSX
+if [ "$(bash --version |grep 'version 4')" == "" ]; then
+    echo "Bash version 4 is required to run cipherscan."
+    echo "Please upgrade your version of bash (ex: brew install bash)."
+    exit 1
+fi
 
 # test that timeout or gtimeout (darwin) are present
 TIMEOUTBIN="$(which timeout)"
@@ -596,6 +609,12 @@ test_serverside_ordering() {
     fi
 }
 
+# If no options are given, give usage information and exit (with error code)
+if [ $# -eq 0 ]; then
+   usage;
+   exit 1
+fi
+
 # UNKNOWNOPTIONS=""
 while :
 do
@@ -660,13 +679,7 @@ do
     esac
 done
 
-if [ $VERBOSE != 0 ] ; then
-    [ -n "$CACERTS" ] && echo "Using trust anchors from $CACERTS"
-    echo "Loading $($OPENSSLBIN ciphers -v $CIPHERSUITE 2>/dev/null|grep Kx|wc -l) ciphersuites from $(echo -n $($OPENSSLBIN version 2>/dev/null))"
-         $OPENSSLBIN ciphers ALL 2>/dev/null
-fi
-
-# echo paramters left: $@
+# echo parameters left: $@
 
 TEMPTARGET=$(sed -e 's/^.* //'<<<"${@}")
 HOST=$(sed -e 's/:.*//'<<<"${TEMPTARGET}")
@@ -689,6 +702,12 @@ if [ ! -x $OPENSSLBIN ]; then
     if [ "$OUTPUTFORMAT" == "terminal" ]; then
         echo "custom openssl not executable, falling back to system one from $OPENSSLBIN"
     fi
+fi
+
+if [ $VERBOSE != 0 ] ; then
+    [ -n "$CACERTS" ] && echo "Using trust anchors from $CACERTS"
+    echo "Loading $($OPENSSLBIN ciphers -v $CIPHERSUITE 2>/dev/null|grep Kx|wc -l) ciphersuites from $(echo -n $($OPENSSLBIN version 2>/dev/null))"
+         $OPENSSLBIN ciphers ALL 2>/dev/null
 fi
 
 SCLIENTARGS=$(sed -e s,${TEMPTARGET},,<<<"${@}")
