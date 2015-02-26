@@ -62,7 +62,7 @@ def is_fubar(results):
                 has_wrong_pfs = True
         if 'md5WithRSAEncryption' in conn['sigalg']:
             has_md5_sig = True
-            logging.debug(conn['sigalg']+ ' is a fubar cert signature')
+            logging.debug(conn['sigalg'][0] + ' is a fubar cert signature')
             fubar = True
         if conn['trusted'] == 'False':
             has_untrust_cert = True
@@ -410,7 +410,9 @@ def build_ciphers_lists(opensslbin):
     # use system openssl if not on linux 64
     if not opensslbin:
         if platform.system() == 'Linux' and platform.architecture()[0] == '64bit':
-            opensslbin='./openssl'
+            opensslbin = mypath + '/openssl'
+        elif platform.system() == 'Darwin' and platform.architecture()[0] == '64bit':
+            opensslbin = mypath + '/openssl-darwin64'
         else:
             opensslbin='openssl'
             print("warning: analyze.py is using system's openssl, which may limit the tested ciphers and recommendations")
@@ -456,6 +458,7 @@ def main():
         help='use nagios-conformant exit codes')
     args = parser.parse_args()
 
+    global mypath
     mypath = os.path.dirname(os.path.realpath(sys.argv[0]))
 
     if args.debug:
