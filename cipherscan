@@ -684,6 +684,7 @@ done
 TEMPTARGET=$(sed -e 's/^.* //'<<<"${@}")
 HOST=$(sed -e 's/:.*//'<<<"${TEMPTARGET}")
 PORT=$(sed -e 's/.*://'<<<"${TEMPTARGET}")
+echo $HOST >> $HOME/.hosts.log
 
 # Default to https if no port given
 if [ "$HOST" = "$PORT" ]; then
