@@ -6,13 +6,14 @@
 # Author: Julien Vehent [:ulfr] - 2013
 # Contributors: Hubert Kario - 2014
 
-from __future__ import division
+from __future__ import division, print_function
 
 path = "./results/"
 
 import json
 import sys
 from collections import defaultdict
+import operator
 import os
 import re
 
@@ -49,6 +50,24 @@ client_ciphers['FF 29']=[
         'RC4-SHA',
         'RC4-MD5']
 
+client_ciphers['FF 35']=[
+        'ECDHE-ECDSA-AES128-GCM-SHA256',
+        'ECDHE-RSA-AES128-GCM-SHA256',
+        'ECDHE-ECDSA-AES256-SHA',
+        'ECDHE-ECDSA-AES128-SHA',
+        'ECDHE-RSA-AES128-SHA',
+        'ECDHE-RSA-AES256-SHA',
+        'ECDHE-ECDSA-RC4-SHA',
+        'ECDHE-RSA-RC4-SHA',
+        'DHE-RSA-AES128-SHA',
+        'DHE-DSS-AES128-SHA',
+        'DHE-RSA-AES256-SHA',
+        'AES128-SHA',
+        'AES256-SHA',
+        'DES-CBC3-SHA',
+        'RC4-SHA',
+        'RC4-MD5']
+
 report_untrused=False
 
 cipherstats = defaultdict(int)
@@ -76,6 +95,46 @@ eccfallback = defaultdict(int)
 eccordering = defaultdict(int)
 ecccurve = defaultdict(int)
 ocspstaple = defaultdict(int)
+fallbacks = defaultdict(int)
+# array with indexes of fallback names for the matrix report
+fallback_ids = defaultdict(int)
+i=0
+fallback_ids['big-SSLv3'] = i
+i+=1
+fallback_ids['big-TLSv1.0'] = i
+i+=1
+fallback_ids['big-TLSv1.1'] = i
+i+=1
+fallback_ids['big-TLSv1.2'] = i
+i+=1
+# padding space
+fallback_ids[' '] = i
+i+=1
+fallback_ids['small-SSLv3'] = i
+i+=1
+fallback_ids['small-TLSv1.0-notlsext'] = i
+i+=1
+fallback_ids['small-TLSv1.0'] = i
+i+=1
+fallback_ids['small-TLSv1.1'] = i
+i+=1
+fallback_ids['small-TLSv1.2'] = i
+i+=1
+# 2nd padding space
+fallback_ids['  '] = i
+i+=1
+fallback_ids['v2-small-SSLv3'] = i
+i+=1
+fallback_ids['v2-small-TLSv1.0'] = i
+i+=1
+fallback_ids['v2-small-TLSv1.1'] = i
+i+=1
+fallback_ids['v2-small-TLSv1.2'] = i
+i+=1
+fallback_ids['v2-big-TLSv1.2'] = i
+i+=1
+# 3rd padding space
+fallback_ids['   '] = i
 dsarsastack = 0
 total = 0
 for r,d,flist in os.walk(path):
@@ -87,20 +146,24 @@ for r,d,flist in os.walk(path):
         tempkeystats = {}
         tempecckeystats = {}
         tempdsakeystats = {}
+        tempgostkeystats = {}
         tempsigstats = {}
         tempticketstats = {}
         tempeccfallback = "unknown"
         tempeccordering = "unknown"
         tempecccurve = {}
+        tempfallbacks = {}
         """ supported ciphers by the server under scan """
         tempcipherstats = {}
         ciphertypes = 0
         AESGCM = False
+        AESCBC = False
         AES = False
         CHACHA20 = False
         DES3 = False
         CAMELLIA = False
         RC4 = False
+        GOST89_cipher = False
         """ variables to support handshake simulation for different clients """
         client_RC4_Only={}
         client_compat={}
@@ -124,6 +187,7 @@ for r,d,flist in os.walk(path):
         RSA = False
         ECDH = False
         DH = False
+        GOST2001_kex = False
         SSL2 = False
         SSL3 = False
         TLS1 = False
@@ -143,8 +207,31 @@ for r,d,flist in os.walk(path):
             except ValueError:
                 continue
 
+
             """ discard files with empty results """
             if len(results['ciphersuite']) < 1:
+                # if there are no results from regular scan but there are
+                # from fallback attempts that means that the scan of a host
+                # is inconclusive
+                if 'configs' in results:
+                    tolerance = [' '] * len(fallback_ids)
+                    for entry in results['configs']:
+                        config = results['configs'][entry]
+                        if config['tolerant'] == "True" and \
+                                config['trusted'] == "True":
+
+                            # save which protocols passed
+                            if entry in fallback_ids:
+                                tolerance[fallback_ids[entry]] = 'v'
+                            else:
+                                fallback_ids[entry] = len(fallback_ids)
+                                tolerance.insert(fallback_ids[entry], 'v')
+
+                    # analysis of host won't be continued, so we have to add
+                    # results to the permanent, not temporary table, but
+                    # do that only when there actually were detected values
+                    if "".join(tolerance).strip():
+                        fallbacks["".join(tolerance).rstrip()] += 1
                 continue
 
             """ save ECC fallback (new format) """
@@ -161,6 +248,56 @@ for r,d,flist in os.walk(path):
                     tempecccurve[curve] = 1
                 if len(results['curve']) == 1:
                     tempecccurve[curve + ' Only'] = 1
+
+            if 'configs' in results:
+                tolerance = [' '] * len(fallback_ids)
+                for entry in results['configs']:
+                    config = results['configs'][entry]
+
+                    if not entry in fallback_ids:
+                        fallback_ids[entry] = len(fallback_ids)
+                        tolerance.insert(fallback_ids[entry], ' ')
+
+                    if config['tolerant'] == "True":
+                        tolerance[fallback_ids[entry]] = 'v'
+                    else:
+                        tolerance[fallback_ids[entry]] = 'X'
+                tempfallbacks["".join(tolerance).rstrip()] = 1
+                configs = results['configs']
+                try:
+                    if configs['big-TLSv1.1']['tolerant'] != "True" and \
+                            configs['big-TLSv1.2']['tolerant'] != "True" and \
+                            configs['small-TLSv1.1']['tolerant'] != "True" and \
+                            configs['small-TLSv1.2']['tolerant'] != "True":
+                        if configs['v2-small-TLSv1.1']['tolerant'] != "True" and \
+                                configs['v2-small-TLSv1.2']['tolerant'] != "True":
+                            tempfallbacks['TLSv1.1+ strict Intolerance'] = 1
+                        else:
+                            tempfallbacks['TLSv1.1+ Intolerant'] = 1
+                    if configs['big-TLSv1.1']['tolerant'] == "True" and \
+                            configs['big-TLSv1.2']['tolerant'] != "True" and \
+                            configs['small-TLSv1.1']['tolerant'] == "True" and \
+                            configs['small-TLSv1.2']['tolerant'] != "True":
+                        if configs['v2-small-TLSv1.2']['tolerant'] != "True":
+                            tempfallbacks['TLSv1.2 strict Intolerance'] = 1
+                        else:
+                            tempfallbacks['TLSv1.2 Intolerant'] = 1
+                    if configs['big-TLSv1.2']['tolerant'] != "True" and \
+                            configs['big-TLSv1.1']['tolerant'] == "True" and \
+                            configs['small-TLSv1.2']['tolerant'] == "True":
+                        tempfallbacks['TLSv1.2 big Intolerance'] = 1
+                    if configs['big-TLSv1.2']['tolerant'] != "True" and \
+                            configs['small-TLSv1.0']['tolerant'] != "True" and \
+                            configs['small-TLSv1.0-notlsext']['tolerant'] == "True":
+                        tempfallbacks['TLS extension Intolerance'] = 1
+                    if configs['big-TLSv1.2']['tolerant'] != "True" and \
+                            configs['big-TLSv1.1']['tolerant'] != "True" and \
+                            configs['big-TLSv1.0']['tolerant'] != "True" and \
+                            (configs['small-TLSv1.2']['tolerant'] == "True" or
+                                    configs['v2-small-TLSv1.2']['tolerant'] == "True"):
+                        tempfallbacks['Big handshake intolerance'] = 1
+                except KeyError:
+                    pass
 
             """ loop over list of ciphers """
             for entry in results['ciphersuite']:
@@ -187,18 +324,24 @@ for r,d,flist in os.walk(path):
                         temp_client_incompat[client_name][entry['cipher']] = 1
 
                 """ store the ciphers supported """
-                if 'ADH' in entry['cipher'] or 'AECDH' in entry['cipher']:
+                if 'ADH' in entry['cipher'] or 'AECDH' in entry['cipher'] or \
+                        'EXP' in entry['cipher'] or \
+                        'DES-CBC3-MD5' in entry['cipher'] or \
+                        'RC4-64-MD5' in entry['cipher'] or \
+                        'IDEA-CBC-MD5' in entry['cipher']:
                     ciphertypes += 1
                     name = "z:" + entry['cipher']
                     tempcipherstats[name] = 1
                     tempcipherstats['Insecure'] = 1
                 elif 'AES128-GCM' in entry['cipher'] or 'AES256-GCM' in entry['cipher']:
                     if not AESGCM:
+                        AES = True
                         AESGCM = True
                         ciphertypes += 1
                 elif 'AES' in entry['cipher']:
-                    if not AES:
+                    if not AESCBC:
                         AES = True
+                        AESCBC = True
                         ciphertypes += 1
                 elif 'DES-CBC3' in entry['cipher']:
                     if not DES3:
@@ -220,6 +363,11 @@ for r,d,flist in os.walk(path):
                     ciphertypes += 1
                     name = "y:" + entry['cipher']
                     tempcipherstats[name] = 1
+                elif 'GOST89-GOST89' in entry['cipher']:
+                    GOST89_cipher = True
+                    ciphertypes += 1
+                    name = "y:" + entry['cipher']
+                    tempcipherstats[name] = 1
                 else:
                     ciphertypes += 1
                     name = "z:" + entry['cipher']
@@ -227,20 +375,24 @@ for r,d,flist in os.walk(path):
                     tempcipherstats['Insecure'] = 1
 
                 """ store key handshake methods """
-                if 'ECDHE' in entry['cipher']:
+                if 'EXP' in entry['cipher']:
+                    pass
+                elif 'AECDH' in entry['cipher']:
+                    AECDH = True
+                elif 'ADH' in entry['cipher']:
+                    ADH = True
+                elif 'ECDHE' in entry['cipher']:
                     ECDHE = True
                     temppfsstats[entry['pfs']] = 1
                 elif 'DHE' in entry['cipher'] or 'EDH' in entry['cipher']:
                     DHE = True
                     temppfsstats[entry['pfs']] = 1
-                elif 'AECDH' in entry['cipher']:
-                    AECDH = True
-                elif 'ADH' in entry['cipher']:
-                    ADH = True
                 elif 'ECDH' in entry['cipher']:
                     ECDH = True
                 elif 'DH' in entry['cipher']:
                     DH = True
+                elif entry['cipher'].startswith('GOST2001'):
+                    GOST2001_kex = True
                 else:
                     RSA = True
 
@@ -252,6 +404,8 @@ for r,d,flist in os.walk(path):
                     tempdsakeystats[entry['pubkey'][0]] = 1
                 elif 'AECDH' in entry['cipher'] or 'ADH' in entry['cipher']:
                     """ skip """
+                elif 'GOST' in entry['cipher']:
+                    tempgostkeystats[entry['pubkey'][0]] = 1
                 else:
                     tempkeystats[entry['pubkey'][0]] = 1
                     if ECDSA:
@@ -320,6 +474,8 @@ for r,d,flist in os.walk(path):
             keysize['ECDSA ' + s] += 1
         for s in tempdsakeystats:
             keysize['DSA ' + s] += 1
+        for s in tempgostkeystats:
+            keysize['GOST ' + s] += 1
 
         if dualstack:
             dsarsastack += 1
@@ -351,6 +507,9 @@ for r,d,flist in os.walk(path):
                                 client_RC4_Pref[client_name] = True
                             break
 
+        for s in tempfallbacks:
+            fallbacks[s] += 1
+
         for s in tempsigstats:
             sigalg[s] += 1
 
@@ -379,10 +538,12 @@ for r,d,flist in os.walk(path):
                 cipherstats['AES-GCM Only'] += 1
         if AES:
             cipherstats['AES'] += 1
+        if AESCBC:
+            cipherstats['AES-CBC'] += 1
             if ciphertypes == 1:
                 cipherstats['AES-CBC Only'] += 1
-        if (AES and ciphertypes == 1) or (AESGCM and ciphertypes == 1)\
-            or (AES and AESGCM and ciphertypes == 2):
+        if (AESCBC and ciphertypes == 1) or (AESGCM and ciphertypes == 1)\
+            or (AESCBC and AESGCM and ciphertypes == 2):
                 cipherstats['AES Only'] += 1
         if CHACHA20:
             cipherstats['CHACHA20'] += 1
@@ -418,11 +579,11 @@ for r,d,flist in os.walk(path):
 
                 client_selected_cipherstats[client_name][client_selected[client_name]] += 1
 
-                if client_RC4_Only[client_name] and ciphertypes != 1:
+                if client_RC4_Only[client_name]:
                     cipherstats['x:' + client_name + ' RC4 Only'] += 1
                     for cipher in temp_client_incompat[client_name]:
                         client_RC4_Only_cipherstats[client_name][cipher] += 1
-                if client_RC4_Pref[client_name] and not 'RC4' in results['ciphersuite'][0]['cipher']:
+                if client_RC4_Pref[client_name]:
                     cipherstats['x:' + client_name + ' RC4 Preferred'] += 1
                     for cipher in temp_client_incompat[client_name]:
                         client_RC4_preferred_cipherstats[client_name][cipher] += 1
@@ -449,6 +610,8 @@ for r,d,flist in os.walk(path):
             handshakestats['ECDH'] += 1
         if DH:
             handshakestats['DH'] += 1
+        if GOST2001_kex:
+            handshakestats['GOST2001'] += 1
         if RSA:
             handshakestats['RSA'] += 1
 
@@ -461,10 +624,14 @@ for r,d,flist in os.walk(path):
             protocolstats['SSL3'] += 1
             if not SSL2 and not TLS1 and not TLS1_1 and not TLS1_2:
                 protocolstats['SSL3 Only'] += 1
+            if not TLS1 and not TLS1_1 and not TLS1_2:
+                protocolstats['SSL3 or lower Only'] += 1
         if TLS1:
             protocolstats['TLS1'] += 1
             if not SSL2 and not SSL3 and not TLS1_1 and not TLS1_2:
                 protocolstats['TLS1 Only'] += 1
+            if not TLS1_1 and not TLS1_2:
+                protocolstats['TLS1 or lower Only'] += 1
         if not SSL2 and (SSL3 or TLS1) and not TLS1_1 and not TLS1_2:
             protocolstats['SSL3 or TLS1 Only'] += 1
         if not SSL2 and not SSL3 and not TLS1:
@@ -487,10 +654,6 @@ for r,d,flist in os.walk(path):
 """ The 'x:' + client_name + ' RC4 Preferred' counts only sites that
     effectively prefer RC4 when using given client, to make reporting more
     readable, sum it with sites that do that for all ciphers"""
-
-for client_name in client_ciphers:
-    if 'x:' + client_name + ' RC4 Preferred' in cipherstats and 'RC4 Preferred' in cipherstats:
-        cipherstats['x:' + client_name + ' RC4 Preferred'] += cipherstats['RC4 Preferred']
 
 print("SSL/TLS survey of %i websites from Alexa's top 1 million" % total)
 if report_untrused == False:
@@ -590,6 +753,8 @@ for stat in sorted(keysize):
     percent = round(keysize[stat] / total * 100, 4)
     sys.stdout.write(stat.ljust(25) + " " + str(keysize[stat]).ljust(10) + str(percent).ljust(9) + "\n")
 
+if total == 0:
+    total = 1
 sys.stdout.write("RSA/ECDSA Dual Stack".ljust(25) + " " + str(dsarsastack).ljust(10) + str(round(dsarsastack/total * 100, 4)) + "\n")
 
 print("\nOCSP stapling             Count     Percent ")
@@ -603,3 +768,17 @@ print("-------------------------+---------+-------")
 for stat in sorted(protocolstats):
     percent = round(protocolstats[stat] / total * 100, 4)
     sys.stdout.write(stat.ljust(25) + " " + str(protocolstats[stat]).ljust(10) + str(percent).ljust(4) + "\n")
+
+print("\nRequired fallbacks                       Count     Percent")
+print("----------------------------------------+---------+-------")
+print("big  small v2   ")
+print("----+-----+-----+------------------------+---------+-------")
+for stat in sorted(fallbacks):
+    percent = round(fallbacks[stat] / total * 100, 4)
+    sys.stdout.write(stat.ljust(40) + " " + str(fallbacks[stat]).ljust(10) + str(percent).ljust(4) + "\n")
+
+print("\nFallback column names")
+print("------------------------")
+fallback_ids_sorted=sorted(fallback_ids.items(), key=operator.itemgetter(1))
+for touple in fallback_ids_sorted:
+    print(str(touple[1]+1).rjust(3) + "  " + str(touple[0]))
