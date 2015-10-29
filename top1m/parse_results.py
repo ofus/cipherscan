@@ -135,6 +135,11 @@ fallback_ids['v2-big-TLSv1.2'] = i
 i+=1
 # 3rd padding space
 fallback_ids['   '] = i
+pfssigalgfallback = defaultdict(int)
+pfssigalgs = defaultdict(int)
+pfssigalgsordering = defaultdict(int)
+compression = defaultdict(int)
+renegotiation = defaultdict(int)
 dsarsastack = 0
 total = 0
 for r,d,flist in os.walk(path):
@@ -155,6 +160,11 @@ for r,d,flist in os.walk(path):
         tempfallbacks = {}
         """ supported ciphers by the server under scan """
         tempcipherstats = {}
+        temppfssigalgordering = {}
+        temppfssigalgfallback = {}
+        temppfssigalgs = {}
+        tempcompression = {}
+        temprenegotiation = {}
         ciphertypes = 0
         AESGCM = False
         AESCBC = False
@@ -249,6 +259,25 @@ for r,d,flist in os.walk(path):
                 if len(results['curve']) == 1:
                     tempecccurve[curve + ' Only'] = 1
 
+            """ collect TLSv1.2 PFS ciphersuite sigalgs """
+            if 'sigalgs' in results:
+                if results['sigalgs']['ordering']:
+                    temppfssigalgordering[results['sigalgs']['ordering']] = 1
+                if results['sigalgs']['ECDSA-fallback']:
+                    temppfssigalgfallback['ECDSA ' + results['sigalgs']['ECDSA-fallback']] = 1
+                if results['sigalgs']['RSA-fallback']:
+                    temppfssigalgfallback['RSA ' + results['sigalgs']['RSA-fallback']] = 1
+                if 'RSA' in results['sigalgs'] and results['sigalgs']['RSA'][0] != 'Fail':
+                    for pfssigalg in results['sigalgs']['RSA']:
+                        temppfssigalgs['RSA-' + pfssigalg]=1
+                    if len(results['sigalgs']['RSA']) == 1:
+                        temppfssigalgs['RSA-' + results['sigalgs']['RSA'][0] + ' Only'] = 1
+                if 'ECDSA' in results['sigalgs'] and results['sigalgs']['ECDSA'][0] != 'Fail':
+                    for pfssigalg in results['sigalgs']['ECDSA']:
+                        temppfssigalgs['ECDSA-' + pfssigalg]=1
+                    if len(results['sigalgs']['ECDSA']) == 1:
+                        temppfssigalgs['ECDSA-' + results['sigalgs']['ECDSA'][0] + ' Only'] = 1
+
             if 'configs' in results:
                 tolerance = [' '] * len(fallback_ids)
                 for entry in results['configs']:
@@ -298,6 +327,13 @@ for r,d,flist in os.walk(path):
                         tempfallbacks['Big handshake intolerance'] = 1
                 except KeyError:
                     pass
+
+            """ get some extra data about server """
+            if 'renegotiation' in results:
+                temprenegotiation[results['renegotiation']] = 1
+
+            if 'compression' in results:
+                tempcompression[results['compression']] = 1
 
             """ loop over list of ciphers """
             for entry in results['ciphersuite']:
@@ -513,6 +549,12 @@ for r,d,flist in os.walk(path):
         for s in tempsigstats:
             sigalg[s] += 1
 
+        for s in temprenegotiation:
+            renegotiation[s] += 1
+
+        for s in tempcompression:
+            compression[s] += 1
+
         if len(tempticketstats) == 1:
             for s in tempticketstats:
                 tickethint[s + " only"] += 1
@@ -530,6 +572,13 @@ for r,d,flist in os.walk(path):
             ocspstaple['Supported'] += 1
         else:
             ocspstaple['Unsupported'] += 1
+
+        for s in temppfssigalgfallback:
+            pfssigalgfallback[s] += 1
+        for s in temppfssigalgs:
+            pfssigalgs[s] += 1
+        for s in temppfssigalgordering:
+            pfssigalgsordering[s] += 1
 
         """ store cipher stats """
         if AESGCM:
@@ -734,6 +783,36 @@ print("-------------------------+---------+--------")
 for stat in sorted(eccordering):
     percent = round(eccordering[stat] / total * 100, 4)
     sys.stdout.write(stat.ljust(25) + " " + str(eccordering[stat]).ljust(10) + str(percent).ljust(9) + "\n")
+
+print("\nTLSv1.2 PFS supported sigalgs  Count     Percent ")
+print("------------------------------+---------+--------")
+for stat in sorted(pfssigalgs):
+    percent = round(pfssigalgs[stat] / total * 100, 4)
+    sys.stdout.write(stat.ljust(30) + " " + str(pfssigalgs[stat]).ljust(10) + str(percent).ljust(9) + "\n")
+
+print("\nTLSv1.2 PFS ordering           Count     Percent ")
+print("------------------------------+---------+--------")
+for stat in sorted(pfssigalgsordering):
+    percent = round(pfssigalgsordering[stat] / total * 100, 4)
+    sys.stdout.write(stat.ljust(30) + " " + str(pfssigalgsordering[stat]).ljust(10) + str(percent).ljust(9) + "\n")
+
+print("\nTLSv1.2 PFS sigalg fallback    Count     Percent ")
+print("------------------------------+---------+--------")
+for stat in sorted(pfssigalgfallback):
+    percent = round(pfssigalgfallback[stat] / total * 100, 4)
+    sys.stdout.write(stat.ljust(30) + " " + str(pfssigalgfallback[stat]).ljust(10) + str(percent).ljust(9) + "\n")
+
+print("\nRenegotiation             Count     Percent ")
+print("-------------------------+---------+--------")
+for stat in natural_sort(renegotiation):
+    percent = round(renegotiation[stat] / total * 100, 4)
+    sys.stdout.write(stat.ljust(25) + " " + str(renegotiation[stat]).ljust(10) + str(percent).ljust(9) + "\n")
+
+print("\nCompression               Count     Percent ")
+print("-------------------------+---------+--------")
+for stat in natural_sort(compression):
+    percent = round(compression[stat] / total * 100, 4)
+    sys.stdout.write(stat.ljust(25) + " " + str(compression[stat]).ljust(10) + str(percent).ljust(9) + "\n")
 
 print("\nTLS session ticket hint   Count     Percent ")
 print("-------------------------+---------+--------")

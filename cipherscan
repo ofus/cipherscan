@@ -4,149 +4,199 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
 # Authors: Julien Vehent [:ulfr] - 201{3,4}
-#          Hubert Kario - 2014
+#          Hubert Kario - 2014, 2015
 
 # vim: autoindent tabstop=4 shiftwidth=4 expandtab softtabstop=4 filetype=sh
 
 DOBENCHMARK=0
 BENCHMARKITER=30
-REALPATH=$(dirname $0)
-# make sure this doesn't error out when readlink -f isn't available (OSX)
-readlink -f $0 &>/dev/null && REALPATH=$(dirname $(readlink -f $0))
-OPENSSLBIN="${REALPATH}/openssl"
-if [ "$(uname -s)" == "Darwin" ]; then
-    OPENSSLBIN="${REALPATH}/openssl-darwin64"
-fi
 
 # cipherscan requires bash4, which doesn't come by default in OSX
-if [ ${BASH_VERSINFO[0]} -lt 4 ]; then
-    echo "Bash version 4 is required to run cipherscan."
-    echo "Please upgrade your version of bash (ex: brew install bash)."
+if [[ ${BASH_VERSINFO[0]} -lt 4 ]]; then
+    echo "Bash version 4 is required to run cipherscan." 1>&2
+    echo "Please upgrade your version of bash (ex: brew install bash)." 1>&2
     exit 1
 fi
 
-# test that timeout or gtimeout (darwin) are present
-TIMEOUTBIN="$(which timeout)"
-
-if [ "$TIMEOUTBIN" == "" ]; then
-    TIMEOUTBIN="$(which gtimeout)"
-    if [ "$TIMEOUTBIN" == "" ]; then
-        echo "neither timeout nor gtimeout are present. install coreutils with {apt-get,yum,brew} install coreutils"
+if [[ -n $NOAUTODETECT ]]; then
+    if ! [[ -f $TIMEOUTBIN && -x $TIMEOUTBIN ]]; then
+        echo "NOAUTODETECT set, but TIMEOUTBIN is not an executable file" 1>&2
         exit 1
     fi
+    if ! [[ -f $OPENSSLBIN && -x $OPENSSLBIN ]]; then
+        echo "NOAUTODETECT set, but OPENSSLBIN is not an executable file" 1>&2
+        exit 1
+    fi
+else
+    case "$(uname -s)" in
+        Darwin)
+            opensslbin_name="openssl-darwin64"
+
+            READLINKBIN=$(which greadlink 2>/dev/null)
+            if [[ -z $READLINKBIN ]]; then
+                echo "greadlink not found. (try: brew install coreutils)" 1>&2
+                exit 1
+            fi
+            TIMEOUTBIN=$(which gtimeout 2>/dev/null)
+            if [[ -z $TIMEOUTBIN ]]; then
+                echo "gtimeout not found. (try: brew install coreutils)" 1>&2
+                exit 1
+            fi
+            ;;
+        *)
+            opensslbin_name="openssl"
+
+            # test that readlink or greadlink (darwin) are present
+            READLINKBIN="$(which readlink)"
+
+            if [[ -z $READLINKBIN ]]; then
+                READLINKBIN="$(which greadlink)"
+                if [[ -z $READLINKBIN ]]; then
+                    echo "neither readlink nor greadlink are present. install coreutils with {apt-get,yum,brew} install coreutils" 1>&2
+                    exit 1
+                fi
+            fi
+
+            # test that timeout or gtimeout (darwin) are present
+            TIMEOUTBIN="$(which timeout)"
+
+            if [[ -z $TIMEOUTBIN ]]; then
+                TIMEOUTBIN="$(which gtimeout)"
+                if [[ -z $TIMEOUTBIN ]]; then
+                    echo "neither timeout nor gtimeout are present. install coreutils with {apt-get,yum,brew} install coreutils" 1>&2
+                    exit 1
+                fi
+            fi
+
+            # Check for busybox, which has different arguments
+            TIMEOUTOUTPUT="$($TIMEOUTBIN --help 2>&1)"
+            if [[ "$TIMEOUTOUTPUT" =~ BusyBox ]]; then
+                TIMEOUTBIN="$TIMEOUTBIN -t"
+            fi
+
+            ;;
+    esac
 fi
 
-# Check for busybox, which has different arguments
-TIMEOUTOUTPUT=$(($TIMEOUTBIN --help) 2>&1)
-if [[ "$TIMEOUTOUTPUT" =~ BusyBox ]]; then
-    TIMEOUTBIN="$TIMEOUTBIN -t"
-fi
+DIRNAMEPATH=$(dirname "$0")
 
-# use custom config file to enable GOST ciphers
-if [[ -e $(dirname $0)/openssl.cnf ]]; then
-    export OPENSSL_CONF="$(dirname $0)/openssl.cnf"
-fi
-
-# find a list of trusted CAs on the local system, or use the provided list
-if [ -z "$CACERTS" ]; then
-    for f in /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt; do
-        if [ -e "$f" ]; then
-            CACERTS="$f"
-            break
-        fi
-    done
-fi
-if [ ! -e "$CACERTS" ]; then
-    CACERTS="$(dirname $0)/ca-bundle.crt"
-fi
+join_array_by_char() {
+    # Two or less parameters (join + 0 or 1 value), then no need to set IFS because no join occurs.
+    if (( $# >= 3 )); then
+        # Three or more parameters (join + 2 values), then we need to set IFS for the join.
+        local IFS=$1
+    fi
+    # Discard the join string (usually ':', could be others).
+    shift
+    # Store the joined string in the result.
+    joined_array="$*"
+}
 
 # RSA ciphers are put at the end to force Google servers to accept ECDSA ciphers
 # (probably a result of a workaround for the bug in Apple implementation of ECDSA)
 CIPHERSUITE="ALL:COMPLEMENTOFALL:+aRSA"
 # some servers are intolerant to large client hello, try a shorter list of
 # ciphers with them
-SHORTCIPHERSUITE=('ECDHE-ECDSA-AES128-GCM-SHA256'
-        'ECDHE-RSA-AES128-GCM-SHA256'
-        'ECDHE-RSA-AES256-GCM-SHA384'
-        'ECDHE-ECDSA-AES256-SHA'
-        'ECDHE-ECDSA-AES128-SHA'
-        'ECDHE-RSA-AES128-SHA'
-        'ECDHE-RSA-AES256-SHA'
-        'ECDHE-RSA-DES-CBC3-SHA'
-        'ECDHE-ECDSA-RC4-SHA'
-        'ECDHE-RSA-RC4-SHA'
-        'DHE-RSA-AES128-SHA'
-        'DHE-DSS-AES128-SHA'
-        'DHE-RSA-CAMELLIA128-SHA'
-        'DHE-RSA-AES256-SHA'
-        'DHE-DSS-AES256-SHA'
-        'DHE-RSA-CAMELLIA256-SHA'
-        'EDH-RSA-DES-CBC3-SHA'
-        'AES128-SHA'
-        'CAMELLIA128-SHA'
-        'AES256-SHA'
-        'CAMELLIA256-SHA'
-        'DES-CBC3-SHA'
-        'RC4-SHA'
-        'RC4-MD5')
+SHORTCIPHERSUITE=(
+    'ECDHE-ECDSA-AES128-GCM-SHA256'
+    'ECDHE-RSA-AES128-GCM-SHA256'
+    'ECDHE-RSA-AES256-GCM-SHA384'
+    'ECDHE-ECDSA-AES256-SHA'
+    'ECDHE-ECDSA-AES128-SHA'
+    'ECDHE-RSA-AES128-SHA'
+    'ECDHE-RSA-AES256-SHA'
+    'ECDHE-RSA-DES-CBC3-SHA'
+    'ECDHE-ECDSA-RC4-SHA'
+    'ECDHE-RSA-RC4-SHA'
+    'DHE-RSA-AES128-SHA'
+    'DHE-DSS-AES128-SHA'
+    'DHE-RSA-CAMELLIA128-SHA'
+    'DHE-RSA-AES256-SHA'
+    'DHE-DSS-AES256-SHA'
+    'DHE-RSA-CAMELLIA256-SHA'
+    'EDH-RSA-DES-CBC3-SHA'
+    'AES128-SHA'
+    'CAMELLIA128-SHA'
+    'AES256-SHA'
+    'CAMELLIA256-SHA'
+    'DES-CBC3-SHA'
+    'RC4-SHA'
+    'RC4-MD5'
+)
+join_array_by_char ':' "${SHORTCIPHERSUITE[@]}"
+SHORTCIPHERSUITESTRING="$joined_array"
+
 # as some servers are intolerant to large client hello's (or ones that have
 # RC4 ciphers below position 64), use the following for cipher testing in case
 # of problems
 FALLBACKCIPHERSUITE=(
-        'ECDHE-RSA-AES128-GCM-SHA256'
-        'ECDHE-RSA-AES128-SHA256'
-        'ECDHE-RSA-AES128-SHA'
-        'ECDHE-RSA-DES-CBC3-SHA'
-        'ECDHE-RSA-RC4-SHA'
-        'DHE-RSA-AES128-SHA'
-        'DHE-DSS-AES128-SHA'
-        'DHE-RSA-CAMELLIA128-SHA'
-        'DHE-RSA-AES256-SHA'
-        'DHE-DSS-AES256-SHA'
-        'DHE-RSA-CAMELLIA256-SHA'
-        'EDH-RSA-DES-CBC3-SHA'
-        'AES128-SHA'
-        'CAMELLIA128-SHA'
-        'AES256-SHA'
-        'CAMELLIA256-SHA'
-        'DES-CBC3-SHA'
-        'RC4-SHA'
-        'RC4-MD5'
-        'SEED-SHA'
-        'IDEA-CBC-SHA'
-        'IDEA-CBC-MD5'
-        'RC2-CBC-MD5'
-        'DES-CBC3-MD5'
-        'EXP1024-DHE-DSS-DES-CBC-SHA'
-        'EDH-RSA-DES-CBC-SHA'
-        'EXP1024-DES-CBC-SHA'
-        'DES-CBC-MD5'
-        'EXP1024-RC4-SHA'
-        'EXP-EDH-RSA-DES-CBC-SHA'
-        'EXP-DES-CBC-SHA'
-        'EXP-RC2-CBC-MD5'
-        'EXP-RC4-MD5'
-        )
+    'ECDHE-RSA-AES128-GCM-SHA256'
+    'ECDHE-RSA-AES128-SHA256'
+    'ECDHE-RSA-AES128-SHA'
+    'ECDHE-RSA-DES-CBC3-SHA'
+    'ECDHE-RSA-RC4-SHA'
+    'DHE-RSA-AES128-SHA'
+    'DHE-DSS-AES128-SHA'
+    'DHE-RSA-CAMELLIA128-SHA'
+    'DHE-RSA-AES256-SHA'
+    'DHE-DSS-AES256-SHA'
+    'DHE-RSA-CAMELLIA256-SHA'
+    'EDH-RSA-DES-CBC3-SHA'
+    'AES128-SHA'
+    'CAMELLIA128-SHA'
+    'AES256-SHA'
+    'CAMELLIA256-SHA'
+    'DES-CBC3-SHA'
+    'RC4-SHA'
+    'RC4-MD5'
+    'SEED-SHA'
+    'IDEA-CBC-SHA'
+    'IDEA-CBC-MD5'
+    'RC2-CBC-MD5'
+    'DES-CBC3-MD5'
+    'EXP1024-DHE-DSS-DES-CBC-SHA'
+    'EDH-RSA-DES-CBC-SHA'
+    'EXP1024-DES-CBC-SHA'
+    'DES-CBC-MD5'
+    'EXP1024-RC4-SHA'
+    'EXP-EDH-RSA-DES-CBC-SHA'
+    'EXP-DES-CBC-SHA'
+    'EXP-RC2-CBC-MD5'
+    'EXP-RC4-MD5'
+)
+join_array_by_char ':' "${FALLBACKCIPHERSUITE[@]}"
+FALLBACKCIPHERSUITESTRING="$joined_array"
+
 DEBUG=0
 VERBOSE=0
 DELAY=0
-ALLCIPHERS=0
+ALLCIPHERS=""
 OUTPUTFORMAT="terminal"
 TIMEOUT=30
+USECOLORS="auto"
 # place where to put the found intermediate CA certificates and where
 # trust anchors are stored
-CAPATH=""
 SAVECRT=""
-TEST_CURVES="False"
+TEST_CURVES="True"
 has_curves="False"
+TEST_TOLERANCE="True"
+SNI="True"
 # openssl formated list of curves that will cause server to select ECC suite
 ecc_ciphers=""
+TEST_KEX_SIGALG="False"
 unset known_certs
 declare -A known_certs
 unset cert_checksums
 declare -A cert_checksums
 # array with results of tolerance scans (TLS version, extensions, etc.)
 declare -A tls_tolerance
+# array with info on type of fallback on unknown sigalgs (or required ones)
+declare -A sigalgs_fallback
+# array with preferred sigalgs for aRSA and aECDSA ciphers
+declare -a sigalgs_preferred_rsa
+declare -a sigalgs_preferred_ecdsa
+renegotiation=""
+compression=""
 
 # because running external commands like sleep incurs a fork penalty, we
 # first check if it is necessary
@@ -162,12 +212,15 @@ usage() {
 [-v|--verbose] [-o|--openssl file] [openssl s_client args] <target:port>
     usage: $0 -h|--help
 
-$0 attempts to connect to a target site using all the ciphersuites it knows.
-Julien Vehent [:ulfr] - https://github.com/jvehent/cipherscan
+$0 attempts to connect to a target site using all the ciphersuites known
+to OpenSSL it is using.
+
+Julien Vehent [:ulfr] and others (see README.md)
+https://github.com/jvehent/cipherscan
 
 Port defaults to 443
 
-example: $ $0 www.google.com:443
+example: $ $0 www.google.com
 
 Use one of the options below:
 
@@ -182,87 +235,107 @@ Use one of the options below:
 -o | --openssl      path/to/your/openssl binary you want to use.
 --savecrt           path where to save untrusted and leaf certificates
 --[no-]curves       test ECC curves supported by server (req. OpenSSL 1.0.2)
+--sigalg            test signature algorithms used in TLSv1.2 ephemeral ciphers
+                    (req. OpenSSL 1.0.2)
+--[no-]tolerance    test TLS tolerance
+--no-sni            don't use Server Name Indication
+--colors            force use of colors (autodetect by default)
+--no-colors         don't use terminal colors
 -v | --verbose      Increase verbosity.
 
 The rest of the arguments will be interpreted as openssl s_client argument.
-This enables checking smtp/imap/pop3/ftp/xmpp via -starttls
 
-EXAMPLES: $0 -starttls xmpp jabber.ccc.de:5222
+Some useful OpenSSL options:
+-starttls [smtp|imap|pop3|ftp|xmpp] Enable support and testing of the protocols
+                    that require turning TLS after initial protocol specific
+                    hello
+-servername name    Request SNI support for connections
+-verify_hostname name Request host name verification in connection
+                    (req. OpenSSL 1.0.2)
+-verify_ip ip       Request host name verification for an IP address, usually
+                    not specified in certificates (req. OpenSSL 1.0.2)
+
+EXAMPLES:
+$0 -starttls xmpp jabber.ccc.de:5222
+$0 -servername youtube.com youtube.com:443
 "
 }
 
 verbose() {
-    if [ $VERBOSE != 0 ]; then
+    if [[ $VERBOSE != 0 ]]; then
         echo "$@" >&2
     fi
 }
 
 debug(){
-    if [ $DEBUG == 1 ]; then
+    if [[ $DEBUG == 1 ]]; then
         echo Debug: "$@" >&2
 	set -evx
     fi
 }
 
 # obtain an array of curves supported by openssl
-CURVES=(sect163k1 # K-163
-    sect163r1
-    sect163r2 # B-163
-    sect193r1
-    sect193r2
-    sect233k1 # K-233
-    sect233r1 # B-233
-    sect239k1
-    sect283k1 # K-283
-    sect283r1 # B-283
-    sect409k1 # K-409
-    sect409r1 # B-409
-    sect571k1 # K-571
-    sect571r1 # B-571
-    secp160k1
-    secp160r1
-    secp160r2
-    secp192k1
-    prime192v1 # P-192 secp192r1
-    secp224k1
-    secp224r1 # P-224
-    secp256k1
-    prime256v1 # P-256 secp256r1
-    secp384r1 # P-384
-    secp521r1 # P-521
-    brainpoolP256r1
-    brainpoolP384r1
-    brainpoolP512r1)
+CURVES=(
+    'sect163k1' # K-163
+    'sect163r1'
+    'sect163r2' # B-163
+    'sect193r1'
+    'sect193r2'
+    'sect233k1' # K-233
+    'sect233r1' # B-233
+    'sect239k1'
+    'sect283k1' # K-283
+    'sect283r1' # B-283
+    'sect409k1' # K-409
+    'sect409r1' # B-409
+    'sect571k1' # K-571
+    'sect571r1' # B-571
+    'secp160k1'
+    'secp160r1'
+    'secp160r2'
+    'secp192k1'
+    'prime192v1' # P-192 secp192r1
+    'secp224k1'
+    'secp224r1' # P-224
+    'secp256k1'
+    'prime256v1' # P-256 secp256r1
+    'secp384r1' # P-384
+    'secp521r1' # P-521
+    'brainpoolP256r1'
+    'brainpoolP384r1'
+    'brainpoolP512r1'
+)
 
 # many curves have alternative names, this array provides a mapping to find the IANA
 # name of a curve using its alias
-CURVES_MAP=("sect163k1 K-163"
-      "sect163r2 B-163"
-      "sect233k1 K-233"
-      "sect233r1 B-233"
-      "sect283k1 K-283"
-      "sect283r1 B-283"
-      "sect409k1 K-409"
-      "sect409r1 B-409"
-      "sect571k1 K-571"
-      "sect571r1 B-571"
-      "prime192v1 P-192 secp192r1"
-      "secp224r1 P-224"
-      "prime256v1 P-256 secp256r1"
-      "secp384r1 P-384"
-      "secp521r1 P-521")
+CURVES_MAP=(
+    'sect163k1 K-163'
+    'sect163r2 B-163'
+    'sect233k1 K-233'
+    'sect233r1 B-233'
+    'sect283k1 K-283'
+    'sect283r1 B-283'
+    'sect409k1 K-409'
+    'sect409r1 B-409'
+    'sect571k1 K-571'
+    'sect571r1 B-571'
+    'prime192v1 P-192 secp192r1'
+    'secp224r1 P-224'
+    'prime256v1 P-256 secp256r1'
+    'secp384r1 P-384'
+    'secp521r1 P-521'
+)
 
 get_curve_name() {
     local identifier=$1
     for c in "${CURVES_MAP[@]}"; do
         if [[ "$c" =~ $identifier ]]; then
             verbose "$c matches identifier $identifier"
-            local map=(${c// / })
-            echo ${map[0]}
+            echo "${c%% *}"
             return
         fi
     done
-    echo $identifier
+    echo "$identifier"
     return
 }
 
@@ -275,38 +348,35 @@ c_hash() {
         fi
         if [[ ! -e $1/${h}.${num} ]]; then
             # file doesn't exist, create a link
-            pushd "$1" > /dev/null
-            ln -s "$2" "${h}.${num}"
+            if pushd "$1" > /dev/null; then
+                ln -s "$2" "${h}.${num}"
+            else
+                echo "'pushd $1' failed unexpectedly, refusing to proceed" 1>&2
+                exit 1
+            fi
             popd > /dev/null
             break
         fi
     done
 }
 
-crude_grep() {
-    while read line; do
-        if [[ $line =~ $1 ]]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
 check_option_support() {
-    $OPENSSLBIN s_client -help 2>&1 | crude_grep "$1"
-    return $?
+    [[ $OPENSSLBINHELP =~ "$1" ]]
 }
 
 parse_openssl_output() {
     # clear variables in case matching doesn't hit them
     current_ocspstaple="False"
     current_cipher=""
+    current_kex_sigalg=""
     current_pfs=""
     current_protocol=""
     current_tickethint="None"
     current_pubkey=0
     current_trusted="False"
     current_sigalg="None"
+    current_renegotiation="False"
+    current_compression=""
 
     certs_found=0
     current_raw_certificates=()
@@ -333,6 +403,26 @@ parse_openssl_output() {
         if [[ $line =~ New,\  ]]; then
             local match=($line)
             current_cipher="${match[4]}"
+            continue
+        fi
+
+        # renegotiation support
+        if [[ $line =~ Secure\ Renegotiation\ IS\ supported ]]; then
+            current_renegotiation="secure"
+        fi
+        if [[ $line =~ Secure\ Renegotiation\ IS\ NOT\ supported ]]; then
+            current_renegotiation="insecure"
+        fi
+
+        # compression settings
+        if [[ $line =~ Compression:\ (.*) ]]; then
+            current_compression="${BASH_REMATCH[1]}"
+        fi
+
+        # extract the signing algorithm used in TLSv1.2 ephemeral kex
+        if [[ $line =~ Peer\ signing\ digest ]]; then
+            local match=($line)
+            current_kex_sigalg="${match[3]}"
             continue
         fi
 
@@ -386,17 +476,12 @@ parse_openssl_output() {
 
     # if we found any certs in output, process the first one and extract
     # the signature algorithm on it (it's the server's certificate)
-    if [[ $certs_found -gt 0 ]]; then
+    if (( certs_found > 0 )); then
         local ossl_out=$(${OPENSSLBIN} x509 -noout -text 2>/dev/null <<<"${current_raw_certificates[0]}")
+        local regex='Signature Algorithm[^ ]+ +(.+$)'
         while read data; do
-            if [[ $data =~ Signature\ Algorithm ]]; then
-                local match=($data)
-                unset match[0]
-                unset match[1]
-                local old_IFS="$IFS"
-                IFS="_"
-                current_sigalg="${match[*]}"
-                IFS="$old_IFS"
+            if [[ $data =~ $regex ]]; then
+                current_sigalg="${BASH_REMATCH[1]// /_}"
             fi
         done <<<"$ossl_out"
     fi
@@ -404,7 +489,7 @@ parse_openssl_output() {
 
 # Connect to a target host with the selected ciphersuite
 test_cipher_on_target() {
-    local sslcommand=$@
+    local sslcommand="$*"
     cipher=""
     local cmnd=""
     protocols=""
@@ -416,7 +501,7 @@ test_cipher_on_target() {
         # sslv2 client hello doesn't support SNI extension
         # in SSLv3 mode OpenSSL just ignores the setting so it's ok
         # -status exception is ignored in SSLv2, go figure
-        if [ "$tls_version" == "-ssl2" ]; then
+        if [[ "$tls_version" == "-ssl2" ]]; then
             if [[ "$sslcommand" =~ (.*)(-servername\ [^ ]*)(.*) ]]; then
                 cmnd="${BASH_REMATCH[1]} ${BASH_REMATCH[3]}"
             else
@@ -438,7 +523,7 @@ test_cipher_on_target() {
         local certificate_count=$certs_found
         debug "server presented $certificate_count certificates"
         local i
-        for ((i=0; i<$certificate_count; i=i+1 )); do
+        for ((i=0; i<certificate_count; i=i+1 )); do
 
             # extract i'th certificate
             local cert="${current_raw_certificates[$i]}"
@@ -446,8 +531,8 @@ test_cipher_on_target() {
             local cksum=($(cksum <<<"$cert"))
             # compare the values not just checksums so that eventual collision
             # doesn't mess up results
-            if [[ ${known_certs[$cksum]} == $cert ]]; then
-                if [ -n "${current_certificates}" ]; then
+            if [[ ${known_certs[$cksum]} == "$cert" ]]; then
+                if [[ -n "${current_certificates}" ]]; then
                     current_certificates+=","
                 fi
                 current_certificates+="\"${cert_checksums[$cksum]}\""
@@ -498,7 +583,7 @@ test_cipher_on_target() {
                 fi
             fi
             # save the sha sum for reporting
-            if [ -n "${current_certificates}" ]; then
+            if [[ -n "${current_certificates}" ]]; then
                 current_certificates+=","
             fi
             current_certificates+="\"${sha256sum}\""
@@ -515,20 +600,20 @@ test_cipher_on_target() {
             verbose "connection successful; protocol: $current_protocol, cipher: $current_cipher, previous cipher: $previous_cipher"
         fi
         # handling of TLSv1.2 only cipher suites
-        if [ ! -z "$previous_cipher" ] && [ "$previous_cipher" != "$current_cipher" ] && [ "$current_cipher" != "0000" ]; then
+        if [[ ! -z "$previous_cipher" ]] && [[ "$previous_cipher" != "$current_cipher" ]] && [[ "$current_cipher" != "0000" ]]; then
             unset protocols
         fi
         previous_cipher=$current_cipher
 
         # connection succeeded, add TLS version to positive results
-        if [ -z "$protocols" ]; then
+        if [[ -z "$protocols" ]]; then
             protocols=$current_protocol
         else
             protocols="$protocols,$current_protocol"
         fi
         cipher=$current_cipher
         pfs=$current_pfs
-        [ -z $pfs ] && pfs="None"
+        [[ -z $pfs ]] && pfs="None"
         pubkey=$current_pubkey
         sigalg=$current_sigalg
         trusted=$current_trusted
@@ -539,13 +624,13 @@ test_cipher_on_target() {
     done
     # if cipher is empty, that means none of the TLS version worked with
     # the current cipher
-    if [ -z "$cipher" ]; then
+    if [[ -z "$cipher" ]]; then
         verbose "handshake failed, no ciphersuite was returned"
         result='ConnectionFailure'
         return 2
 
     # if cipher contains NONE, the cipher wasn't accepted
-    elif [ "$cipher" == '(NONE)  ' ]; then
+    elif [[ "$cipher" == '(NONE)  ' ]]; then
         result="$cipher $protocols $pubkey $sigalg $trusted $tickethint $ocspstaple $pfs $current_curves $curves_ordering"
         verbose "handshake failed, server returned ciphersuite '$result'"
         return 1
@@ -556,15 +641,15 @@ test_cipher_on_target() {
         # if pfs uses ECDH, test supported curves
         if [[ $pfs =~ ECDH ]]; then
             has_curves="True"
-            if [ $TEST_CURVES == "True" ]; then
+            if [[ $TEST_CURVES == "True" ]]; then
                 test_curves
-                if [ "$ecc_ciphers" != "" ]; then
+                if [[ -n $ecc_ciphers ]]; then
                     ecc_ciphers+=":"
                 fi
                 ecc_ciphers+="$cipher"
             else
                 # resolve the openssl curve to the proper IANA name
-                current_curves="$(get_curve_name $(echo $pfs|cut -d ',' -f2))"
+                current_curves="$(get_curve_name "$(echo $pfs|cut -d ',' -f2)")"
             fi
         fi
         result="$cipher $protocols $pubkey $sigalg $trusted $tickethint $ocspstaple $pfs $current_curves $curves_ordering"
@@ -580,9 +665,9 @@ bench_cipher() {
     local t="$(date +%s%N)"
     verbose "Benchmarking handshake on '$TARGET' with ciphersuite '$ciphersuite'"
     for i in $(seq 1 $BENCHMARKITER); do
-        debug Connection $i
+        debug "Connection $i"
         (echo "Q" | $sslcommand 2>/dev/null 1>/dev/null)
-        if [ $? -gt 0 ]; then
+        if (( $? != 0 )); then
             break
         fi
     done
@@ -590,34 +675,47 @@ bench_cipher() {
     local t="$(($(date +%s%N) - t))"
     verbose "Benchmarking done in $t nanoseconds"
     # Microseconds
-    cipherbenchms="$((t/1000/$BENCHMARKITER))"
+    cipherbenchms="$((t/1000/BENCHMARKITER))"
 }
 
 # Connect to the target and retrieve the chosen cipher
 # recursively until the connection fails
 get_cipher_pref() {
-    [ "$OUTPUTFORMAT" == "terminal" ] && [ $DEBUG -lt 1 ] && echo -n '.'
+    [[ "$OUTPUTFORMAT" == "terminal" ]] && [[ $DEBUG -lt 1 ]] && echo -n '.'
     local ciphersuite="$1"
 
     local sslcommand="$TIMEOUTBIN $TIMEOUT $OPENSSLBIN s_client"
-    if [ -n "$CAPATH" ]; then
+    if [[ -n "$CAPATH" ]]; then
         sslcommand+=" -CApath $CAPATH -showcerts"
-    elif [ -e $CACERTS ]; then
+    elif [[ -e $CACERTS ]]; then
         sslcommand+=" -CAfile $CACERTS"
     fi
     sslcommand+=" -status $SCLIENTARGS -connect $TARGET -cipher $ciphersuite"
 
     verbose "Connecting to '$TARGET' with ciphersuite '$ciphersuite'"
-    test_cipher_on_target "$sslcommand"
-    local success=$?
     # If the connection succeeded with the current cipher, benchmark and store
-    if [ $success -eq 0 ]; then
+    if test_cipher_on_target "$sslcommand"; then
         cipherspref=("${cipherspref[@]}" "$result")
         ciphercertificates=("${ciphercertificates[@]}" "$certificates")
         pciph=($result)
         get_cipher_pref "!$pciph:$ciphersuite"
         return 0
     fi
+}
+
+display_sigalgs_in_terminal() {
+    (echo "prio sigalg"
+    for sigalg in "$@"; do
+        if [[ $sigalg == "MD5" ]]; then
+            color="${c_red}"
+        elif [[ $sigalg == "SHA1" ]]; then
+            color="${c_yellow}"
+        else
+            color="${c_green}"
+        fi
+        echo -e "$cnt ${color}$sigalg${c_reset}"
+        cnt=$((cnt+1))
+    done )| column -t
 }
 
 display_results_in_terminal() {
@@ -630,46 +728,68 @@ display_results_in_terminal() {
     local ocspstaple
     local curvesordering
     local different=False
+    # Configure colors, if terminal supports them
+    if [[ $USECOLORS == "auto" ]]; then
+        if [[ -t 1 ]]; then
+            USECOLORS="True"
+        else
+            USECOLORS="False"
+        fi
+    fi
+    if [[ $USECOLORS == "True" ]]; then
+        c_blue="\033[0;34m"
+        c_green="\033[0;32m"
+        c_yellow="\033[0;33m"
+        c_red="\033[0;31m"
+        c_reset="\033[0m"
+    else
+        c_blue=
+        c_green=
+        c_yellow=
+        c_red=
+        c_reset=
+    fi
+
     echo "Target: $TARGET"; echo
     for cipher in "${cipherspref[@]}"; do
         # get first in array
         pciph=($cipher)
-        if [ $DOBENCHMARK -eq 1 ]; then
+        if [[ $DOBENCHMARK -eq 1 ]]; then
             bench_cipher "$pciph"
             r="$ctr $cipher $cipherbenchms"
         else
             r="$ctr $cipher"
         fi
         local cipher_data=($cipher)
-        if [ $ctr -eq 1 ]; then
+        if [[ $ctr -eq 1 ]]; then
             pubkey="${cipher_data[2]}"
             sigalg="${cipher_data[3]}"
             trusted="${cipher_data[4]}"
             tickethint="${cipher_data[5]}"
             ocspstaple="${cipher_data[6]}"
-            if [[ $TEST_CURVES == "True" && "${cipher_data[9]}" != "" ]]; then
+            if [[ $TEST_CURVES == "True" && -n ${cipher_data[9]} ]]; then
                 curvesordering="${cipher_data[9]}"
             fi
         else
-            if [ "$pubkey" != "${cipher_data[2]}" ]; then
+            if [[ "$pubkey" != "${cipher_data[2]}" ]]; then
                 different=True
             fi
-            if [ "$sigalg" != "${cipher_data[3]}" ]; then
+            if [[ "$sigalg" != "${cipher_data[3]}" ]]; then
                 different=True
             fi
-            if [ "$trusted" != "${cipher_data[4]}" ]; then
+            if [[ "$trusted" != "${cipher_data[4]}" ]]; then
                 different=True
             fi
-            if [ "$tickethint" != "${cipher_data[5]}" ]; then
+            if [[ "$tickethint" != "${cipher_data[5]}" ]]; then
                 different=True
             fi
-            if [ "$ocspstaple" != "${cipher_data[6]}" ]; then
+            if [[ "$ocspstaple" != "${cipher_data[6]}" ]]; then
                 different=True
             fi
-            if [[ "$curvesordering" == "" && "${cipher_data[9]}" != "" ]]; then
+            if [[ -z $curvesordering && -n "${cipher_data[9]}" ]]; then
                 curvesordering="${cipher_data[9]}"
             fi
-            if [[ "$curvesordering" != "" && "$curvesordering" != "${cipher_data[9]}" ]]; then
+            if [[ -n $curvesordering && "$curvesordering" != "${cipher_data[9]}" ]]; then
                 different=True
             fi
         fi
@@ -678,66 +798,169 @@ display_results_in_terminal() {
     done
 
     header="prio ciphersuite protocols"
-    if [ $different == "True" ]; then
+    if [[ $different == "True" ]]; then
         header+=" pubkey_size signature_algoritm trusted ticket_hint ocsp_staple"
     fi
     header+=" pfs"
-    if [ $has_curves == "True" ]; then
+    if [[ $has_curves == "True" ]]; then
         header+=" curves"
         if [[ $TEST_CURVES == "True" && $different == "True" ]]; then
             header+=" curves_ordering"
         fi
     fi
-    if [ $DOBENCHMARK -eq 1 ]; then
+    if [[ $DOBENCHMARK -eq 1 ]]; then
         header+=" avg_handshake_microsec"
     fi
     ctr=0
     for result in "${results[@]}"; do
-        if [ $ctr -eq 0 ]; then
-            echo $header
+        if [[ $ctr -eq 0 ]]; then
+            echo "$header"
             ctr=$((ctr+1))
         fi
-        if [ $different == "True" ]; then
-            echo $result|grep -v '(NONE)'
+        if [[ $different == "True" ]]; then
+            echo "$result"|grep -v '(NONE)'
         else
             # prints priority, ciphersuite, protocols and pfs
             awk '!/(NONE)/{print $1 " " $2 " " $3 " " $9 " " $10}' <<<"$result"
         fi
     done|column -t
     echo
-    if [ $different != "True" ]; then
-        if [ "$trusted" == "True" ]; then
-            echo "Certificate: trusted, $pubkey bit, $sigalg signature"
-        else
-            echo "Certificate: UNTRUSTED, $pubkey bit, $sigalg signature"
-        fi
+    
+    if [[ ($sigalg =~ RSA && $pubkey -ge 2047) || ($sigalg =~ ECDSA && $pubkey -gt 255) ]]; then
+        pubkey="${c_green}${pubkey}${c_reset}"
+    else
+        pubkey="${c_red}${pubkey}${c_reset}"
+    fi
+    if [[ $sigalg =~ md5|sha1 ]]; then
+        sigalg="${c_red}${sigalg}${c_reset}"
+    else
+        sigalg="${c_green}${sigalg}${c_reset}"
+    fi
+    if [[ $trusted == "True" ]]; then
+        trusted="${c_green}trusted${c_reset}"
+    else
+        trusted="${c_red}untrusted${c_reset}"
+    fi
+    if [[ $different != "True" ]]; then
+        echo -e "Certificate: $trusted, $pubkey bits, $sigalg signature"
         echo "TLS ticket lifetime hint: $tickethint"
     fi
     if [[ $ocspstaple == "True" ]]; then
-        echo "OCSP stapling: supported"
+        echo -e "OCSP stapling: ${c_green}supported${c_reset}"
     else
-        echo "OCSP stapling: not supported"
+        echo -e "OCSP stapling: ${c_red}not supported${c_reset}"
     fi
     if [[ $serverside == "True" ]]; then
-        echo "Cipher ordering: server"
+        echo -e "Cipher ordering: ${c_green}server${c_reset}"
     else
-        echo "Cipher ordering: client"
+        echo -e "Cipher ordering: ${c_red}client${c_reset}"
     fi
-    if [ $TEST_CURVES == "True" ]; then
-        echo "Curves ordering: $curvesordering"
-        echo "Curves fallback: $fallback_supported"
+    if [[ $TEST_CURVES == "True" ]]; then
+        if [[ $curvesordering == "server" ]]; then
+            curvesordering="${c_green}${curvesordering}${c_reset}"
+        else
+            if [[ $curvesordering == "" ]]; then
+                curvesordering="none"
+            fi
+            curvesordering="${c_red}${curvesordering}${c_reset}"
+        fi
+        if [[ $fallback_supported == "True" ]]; then
+            fallback_supported="${c_green}yes${c_reset}"
+        else
+            fallback_supported="${c_red}no${c_reset}"
+        fi
+        echo -e "Curves ordering: $curvesordering - fallback: $fallback_supported"
+    fi
+    if [[ $renegotiation ]]; then
+        if [[ $renegotiation == "secure" ]]; then
+            echo -e "Server ${c_green}supports${c_reset} secure renegotiation"
+        else
+            echo -e "Server ${c_red}DOESN'T${c_reset} support secure renegotiation"
+        fi
+    else
+        echo "Renegotiation test error"
+    fi
+    if [[ $compression ]]; then
+        if [[ $compression != "NONE" ]]; then
+            color="${c_red}"
+        else
+            color="${c_green}"
+        fi
+        echo -e "Server supported compression methods:" \
+            "${color}$compression${c_reset}"
+    else
+        echo -e "Supported compression methods ${c_red}test error${c_reset}"
     fi
 
-    echo
-    echo "Fallbacks required:"
-    for test_name in "${!tls_tolerance[@]}"; do
-        if [[ ${tls_tolerance[$test_name]} == "False" ]]; then
-            echo "$test_name config not supported, connection failed"
+    if [[ $TEST_KEX_SIGALG == "True" ]]; then
+        echo
+        echo "TLSv1.2 ephemeral sigalgs:"
+        for auth in "ECDSA" "RSA"; do
+            # not colored as neither of that results alone is good or bad
+            if [[ -z ${sigalgs_fallback[$auth]} ]]; then
+                echo "no PFS $auth ciphers detected"
+            elif [[ ${sigalgs_fallback[$auth]} == "False" ]]; then
+                echo "no PFS $auth fallback"
+            elif [[ ${sigalgs_fallback[$auth]} == "intolerant" ]]; then
+                echo "$auth test: intolerant of sigalg removal"
+            elif [[ ${sigalgs_fallback[$auth]} =~ "pfs-" ]]; then
+                echo "PFS $auth fallbacks to ${sigalgs_fallback[$auth]}"
+            else
+                echo "server forces ${sigalgs_fallback[$auth]} with $auth"
+            fi
+        done
+        if [[ ${sigalgs_ordering} == "server" ]]; then
+            echo -e "${c_green}Server side sigalg ordering${c_reset}"
+        elif [[ ${sigalgs_ordering} == "client" ]]; then
+            echo -e "${c_red}Client side sigalg ordering${c_reset}"
+        elif [[ ${sigalgs_ordering} == "unsupported" ]]; then
+            # do nothing - messages above will report that it's unsupported
+            echo -n
         else
-            local res=(${tls_tolerance[$test_name]})
-            echo "$test_name no fallback req, connected: ${res[1]} ${res[2]}"
+            echo "Ordering test failure: ${sigalgs_ordering}"
         fi
-    done | sort
+
+        if [[ ${#sigalgs_preferred_ecdsa[@]} -gt 0 ]]; then
+            echo
+            if [[ ${sigalgs_preferred_ecdsa[0]} == "Fail" ]]; then
+                echo -e "${c_red}ECDSA test failed${c_reset}"
+            else
+                local cnt=1
+                echo "Supported PFS ECDSA signature algorithms"
+                display_sigalgs_in_terminal "${sigalgs_preferred_ecdsa[@]}"
+            fi
+        fi
+
+        if [[ ${#sigalgs_preferred_rsa[@]} -gt 0 ]]; then
+            echo
+            if [[ ${sigalgs_preferred_rsa[0]} == "Fail" ]]; then
+                echo -e "${c_red}RSA test failed${c_reset}"
+            else
+                local cnt=1
+                echo "Supported PFS RSA signature algorithms"
+                display_sigalgs_in_terminal "${sigalgs_preferred_rsa[@]}"
+            fi
+        fi
+        echo
+    fi
+
+    if [[ $TEST_TOLERANCE == "True" ]]; then
+        if [[ ${tls_tolerance['big-TLSv1.2']} =~ TLSv1\.2 ]]; then
+            echo -e "TLS Tolerance: ${c_green}yes${c_reset}"
+        else
+            echo
+            echo -e "TLS Tolerance: ${c_red}no${c_reset}"
+            echo "Fallbacks required:"
+            for test_name in "${!tls_tolerance[@]}"; do
+                if [[ ${tls_tolerance[$test_name]} == "False" ]]; then
+                    echo "$test_name config not supported, connection failed"
+                else
+                    local res=(${tls_tolerance[$test_name]})
+                    echo "$test_name no fallback req, connected: ${res[1]} ${res[2]}"
+                fi
+            done | sort
+        fi
+    fi
 }
 
 display_results_in_json() {
@@ -746,7 +969,7 @@ display_results_in_json() {
     echo -n "{\"target\":\"$TARGET\",\"utctimestamp\":\"$(date -u '+%FT%T.0Z')\",\"serverside\":\"${serverside}\",\"ciphersuite\": ["
     for cipher in "${cipherspref[@]}"; do
         local cipher_arr=($cipher)
-        [ $ctr -gt 0 ] && echo -n ','
+        (( ctr > 0 )) && echo -n ','
         echo -n "{\"cipher\":\"${cipher_arr[0]}\","
         echo -n "\"protocols\":[\"${cipher_arr[1]//,/\",\"}\"],"
         echo -n "\"pubkey\":[\"${cipher_arr[2]//,/\",\"}\"],"
@@ -758,12 +981,12 @@ display_results_in_json() {
         echo -n "\"ticket_hint\":\"${cipher_arr[5]}\","
         echo -n "\"ocsp_stapling\":\"${cipher_arr[6]}\","
         pfs="${cipher_arr[7]}"
-        [ "$pfs" == "" ] && pfs="None"
+        [[ -z $pfs ]] && pfs="None"
         echo -n "\"pfs\":\"$pfs\""
         if [[ "${cipher_arr[0]}" =~ ECDH ]]; then
             echo -n ","
             echo -n "\"curves\":[\"${cipher_arr[8]//,/\",\"}\"]"
-            if [ $TEST_CURVES == "True" ]; then
+            if [[ $TEST_CURVES == "True" ]]; then
                 echo -n ","
                 echo -n "\"curves_ordering\":\"${cipher_arr[9]}\""
             fi
@@ -772,14 +995,61 @@ display_results_in_json() {
         ctr=$((ctr+1))
     done
     echo -n ']'
-    if [ $TEST_CURVES == "True" ]; then
+    if [[ $TEST_CURVES == "True" ]]; then
         echo -n ",\"curves_fallback\":\"$fallback_supported\""
     fi
+
+    if [[ $renegotiation ]]; then
+        echo -n ",\"renegotiation\":\"$renegotiation\""
+    else
+        echo -n ",\"renegotiation\":\"False\""
+    fi
+
+    if [[ $compression ]]; then
+        echo -n ",\"compression\":\"$compression\""
+    else
+        echo -n ",\"compression\":\"False\""
+    fi
+
+    if [[ $TEST_KEX_SIGALG == "True" ]]; then
+        echo -n ',"sigalgs":{'
+        echo -n "\"ordering\":\"${sigalgs_ordering}\","
+        echo -n "\"ECDSA-fallback\":\"${sigalgs_fallback[ECDSA]}\","
+        echo -n "\"RSA-fallback\":\"${sigalgs_fallback[RSA]}\""
+        if [[ ${#sigalgs_preferred_ecdsa[@]} -gt 0 ]]; then
+            echo -n ","
+            echo -n '"ECDSA":['
+            local cnt=0
+            for sigalg in "${sigalgs_preferred_ecdsa[@]}"; do
+                if [[ $cnt -gt 0 ]]; then
+                    echo -n ','
+                fi
+                echo -n "\"$sigalg\""
+                cnt=$((cnt+1))
+            done
+            echo -n ']'
+        fi
+        if [[ ${#sigalgs_preferred_rsa[@]} -gt 0 ]]; then
+            echo -n ","
+            echo -n '"RSA":['
+            local cnt=0
+            for sigalg in "${sigalgs_preferred_rsa[@]}"; do
+                if [[ $cnt -gt 0 ]]; then
+                    echo -n ','
+                fi
+                echo -n "\"$sigalg\""
+                cnt=$((cnt+1))
+            done
+            echo -n ']'
+        fi
+        echo -n '}'
+    fi
+
     echo -n ',"configs":{'
     ctr=0
     for test_name in "${!tls_tolerance[@]}"; do
         local result=(${tls_tolerance[$test_name]})
-        [ $ctr -gt 0 ] && echo -n ","
+        (( ctr > 0 )) && echo -n ","
         echo -n "\"$test_name\":{"
         if [[ ${result[0]} == "False" ]]; then
             echo -n "\"tolerant\":\"False\""
@@ -794,51 +1064,43 @@ display_results_in_json() {
 }
 
 test_serverside_ordering() {
+    local -a ciphersuites=()
     local ciphersuite=""
     local prefered=""
     # server supports only one cipher or no ciphers, so it effectively uses server side ordering...
-    if [[ ${#cipherspref[@]} -lt 2 ]]; then
+    if (( ${#cipherspref[@]} < 2 )); then
         serverside="True"
         return 0
-    # server supports just two ciphers, so rotate them, that should be enough
-    elif [[ ${#cipherspref[@]} -eq 2 ]]; then
-
-        local cipher=(${cipherspref[1]})
-        prefered="$cipher"
-        ciphersuite=$cipher
-
-        cipher=(${cipherspref[0]})
-        ciphersuite+=":$cipher"
-
-    # server supports 3 or more ciphers, rotate all three. This is necessary because google does
-    # select first client provided cipher, if it is either CDHE-RSA-AES128-GCM-SHA256 or
-    # ECDHE-RSA-CHACHA20-POLY1305
-    else
-        local cipher=(${cipherspref[2]})
-        prefered="$cipher"
-        ciphersuite="$cipher"
-
-        cipher=(${cipherspref[1]})
-        ciphersuite+=":$cipher"
-
-        cipher=(${cipherspref[0]})
-        ciphersuite+=":$cipher"
     fi
+    local cipher=""
+    if (( ${#cipherspref[@]} > 2 )); then
+        # server supports 3 or more ciphers, rotate all three. This is necessary because google does
+        # select first client provided cipher, if it is either CDHE-RSA-AES128-GCM-SHA256 or
+        # ECDHE-RSA-CHACHA20-POLY1305
+        ciphersuites+=("${cipherspref[2]%% *}")
+    fi
+    # else, server supports just two ciphers, so rotate them, that should be enough
+    ciphersuites+=("${cipherspref[1]%% *}")
+    ciphersuites+=("${cipherspref[0]%% *}")
+
+    prefered="${ciphersuites[0]%% *}"
+
+    join_array_by_char ':' "${ciphersuites[@]}"
+    ciphersuite="$joined_array"
 
     local sslcommand="$TIMEOUTBIN $TIMEOUT $OPENSSLBIN s_client"
-    if [ -n "$CAPATH" ]; then
+    if [[ -n "$CAPATH" ]]; then
         sslcommand+=" -CApath $CAPATH -showcerts"
-    elif [ -e "$CACERTS" ]; then
+    elif [[ -e "$CACERTS" ]]; then
         sslcommand+=" -CAfile $CACERTS"
     fi
     sslcommand+=" -status $SCLIENTARGS -connect $TARGET -cipher $ciphersuite"
 
     test_cipher_on_target "$sslcommand"
-    if [ $? -ne 0 ]; then
+    if (( $? != 0 )); then
         serverside="True"
     else
-        local selected=($result)
-        if [[ $selected == $prefered ]]; then
+        if [[ ${result%% *} == "$prefered" ]]; then
             serverside="False"
         else
             serverside="True"
@@ -847,9 +1109,6 @@ test_serverside_ordering() {
 }
 
 test_curves() {
-    # "True" if server supports ciphers that don't use ECC at a lower priority
-    local fallback_available="False"
-
     # return variable: list of curves supported by server, in order
     current_curves=""
     # return variable: check if server uses server side or client side ordering
@@ -858,17 +1117,15 @@ test_curves() {
 
     local curves=(${CURVES[*]})
 
-    OLDIFS="$IFS"
-    IFS=':'
-    verbose "Will test following curves: ${curves[*]}"
-    IFS="$OLDIFS"
+    join_array_by_char ':' "${curves[@]}"
+    verbose "Will test following curves: $joined_array"
 
     # prepare the ssl command we'll be using
     local sslcommand=""
     sslcommand="$TIMEOUTBIN $TIMEOUT $OPENSSLBIN s_client"
-    if [ -n "$CAPATH" ]; then
+    if [[ -n "$CAPATH" ]]; then
         sslcommand+=" -CApath $CAPATH -showcerts"
-    elif [ -e "$CACERTS" ]; then
+    elif [[ -e "$CACERTS" ]]; then
         sslcommand+=" -CAfile $CACERTS"
     fi
     sslcommand+=" -status $SCLIENTARGS -connect $TARGET -cipher $current_cipher"
@@ -882,15 +1139,13 @@ test_curves() {
     # either get a fallback to a non ECC cipher, we run of curves or server
     # tries to negotiate a curve we didn't advertise
     #
-    while [[ ${#curves[@]} -gt 0 ]]; do
-        OLDIFS="$IFS"
-        IFS=':'
-        local test_curves="${curves[*]}"
-        IFS="$OLDIFS"
+    while (( ${#curves[@]} > 0 )); do
+        join_array_by_char ':' "${curves[@]}"
+        local test_curves="$joined_array"
         verbose "Testing $test_curves with command $sslcommand"
 
         ratelimit
-        local tmp=$(echo Q | $sslcommand -curves $test_curves 2>/dev/null)
+        local tmp=$(echo Q | $sslcommand -curves "$test_curves" 2>/dev/null)
         parse_openssl_output <<<"$tmp"
 
         if [[ -z $current_protocol || $current_cipher == "(NONE)" || $current_cipher == '0000' ]]; then
@@ -900,22 +1155,22 @@ test_curves() {
             local ephem_data=(${current_pfs//,/ })
             local cname=""
             if [[ ${ephem_data[0]} =~ ECDH ]]; then
-                if [ "$current_curves" != "" ]; then
+                if [[ -n $current_curves ]]; then
                     current_curves+=","
                 fi
-                cname="$(get_curve_name ${ephem_data[1]})"
+                cname="$(get_curve_name "${ephem_data[1]}")"
                 verbose "Server selected ${ephem_data[1]}, a.k.a $cname"
                 current_curves+="$cname"
             fi
             for id in "${!curves[@]}"; do
-                if [ "$cname" == ${curves[$id]} ]; then
+                if [[ $cname == "${curves[$id]}" ]]; then
                     # we know it's supported, remove it from set of offered ones
                     unset curves[$id]
                     break
                 fi
             done
         fi
-        [ "$OUTPUTFORMAT" == "terminal" ] && [ $DEBUG -lt 1 ] && echo -n '.'
+        [[ "$OUTPUTFORMAT" == "terminal" ]] && [[ $DEBUG -lt 1 ]] && echo -n '.'
     done
 
     # don't penalize servers that will negotiate all curves we know of...
@@ -928,11 +1183,11 @@ test_curves() {
     #
 
     local tmp_curves=(${current_curves//,/ })
-    verbose "Server supported curves: ${tmp_curves[@]}"
+    verbose "Server supported curves: ${tmp_curves[*]}"
 
     # server supports just one or none, so it effectively uses server side
     # ordering (as it dictates what curves client must support)
-    if [ ${#tmp_curves[@]} -lt 2 ]; then
+    if (( ${#tmp_curves[@]} < 2 )); then
         curves_ordering="server"
     else
         # server supports at least 2 curves, rotate their order, see if
@@ -946,7 +1201,7 @@ test_curves() {
 
         verbose "Testing ordering with $sslcommand -curves $test_curves"
         ratelimit
-        local tmp=$(echo Q | $sslcommand -curves $test_curves 2>/dev/null)
+        local tmp=$(echo Q | $sslcommand -curves "$test_curves" 2>/dev/null)
         parse_openssl_output <<<"$tmp"
 
         if [[ -z $current_protocol || $current_cipher == "(NONE)" || $current_cipher == '0000' ]]; then
@@ -955,13 +1210,13 @@ test_curves() {
         else
             local ephem_data=(${current_pfs//,/ })
             verbose "Server selected $current_cipher with $current_pfs"
-            verbose "ephem_data: ${ephem_data[@]}"
+            verbose "ephem_data: ${ephem_data[*]}"
 
             if [[ ${ephem_data[0]} =~ ECDH ]]; then
                 verbose "Server did select ${ephem_data[1]} curve"
                 curves_ordering="inconclusive-${ephem_data[1]}"
-                local cname="$(get_curve_name ${ephem_data[1]})"
-                if [ "$cname" == "$most_wanted" ]; then
+                local cname="$(get_curve_name "${ephem_data[1]}")"
+                if [[ "$cname" == "$most_wanted" ]]; then
                     curves_ordering="client"
                 else
                     curves_ordering="server"
@@ -975,13 +1230,11 @@ test_curves() {
 }
 
 test_curves_fallback() {
-    # "True" if server supports ciphers that don't use ECC at a lower priority
-    local fallback_available="False"
     # return variable: whatever a server will fall back to non ECC suite when
     # client doesn't advertise support for curves the server needs
     fallback_supported="unknown"
 
-    if [ "$ecc_ciphers" == "" ]; then
+    if [[ -z $ecc_ciphers ]]; then
         verbose "No ECC cipher found, can't test curve fallback"
         return
     fi
@@ -989,9 +1242,9 @@ test_curves_fallback() {
     # prepare the ssl command we'll be using
     local sslcommand=""
     sslcommand="$TIMEOUTBIN $TIMEOUT $OPENSSLBIN s_client"
-    if [ -n "$CAPATH" ]; then
+    if [[ -n "$CAPATH" ]]; then
         sslcommand+=" -CApath $CAPATH -showcerts"
-    elif [ -e "$CACERTS" ]; then
+    elif [[ -e "$CACERTS" ]]; then
         sslcommand+=" -CAfile $CACERTS"
     fi
     sslcommand+=" -status $SCLIENTARGS -connect $TARGET -cipher $ecc_ciphers"
@@ -1006,15 +1259,13 @@ test_curves_fallback() {
     # tries to negotiate a curve we didn't advertise
     #
     local curves=(${CURVES[*]})
-    while [[ ${#curves[@]} -gt 0 ]]; do
-        OLDIFS="$IFS"
-        IFS=':'
-        local test_curves="${curves[*]}"
-        IFS="$OLDIFS"
+    while (( ${#curves[@]} > 0 )); do
+        join_array_by_char ':' "${curves[@]}"
+        local test_curves="$joined_array"
         verbose "Testing $sslcommand -curves $test_curves"
 
         ratelimit
-        local tmp=$(echo Q | $sslcommand -curves $test_curves 2>/dev/null)
+        local tmp=$(echo Q | $sslcommand -curves "$test_curves" 2>/dev/null)
         parse_openssl_output <<<"$tmp"
 
         if [[ -z $current_protocol || $current_cipher == "(NONE)" || $current_cipher == '0000' ]]; then
@@ -1027,10 +1278,10 @@ test_curves_fallback() {
 
             if [[ ${ephem_data[0]} =~ ECDH ]]; then
                 # we got an ecc connection, remove the curve from the list of testable curves
-                local cname="$(get_curve_name ${ephem_data[1]})"
+                local cname="$(get_curve_name "${ephem_data[1]}")"
                 verbose "Server selected curve $cname"
                 for id in "${!curves[@]}"; do
-                    if [ "${curves[id]}" == "$cname" ]; then
+                    if [[ "${curves[id]}" == "$cname" ]]; then
                         unset curves[$id]
                         break
                     fi
@@ -1072,6 +1323,16 @@ test_tls_tolerance() {
                 tls_tolerance[$version]="False"
         else
             tls_tolerance[$version]="True $current_protocol $current_cipher $current_trusted"
+
+            # collect renegotiation info
+            if [[ $current_renegotiation != "False" ]]; then
+                renegotiation="$current_renegotiation"
+            fi
+
+            # collect compression info
+            if [[ $version == "big-TLSv1.2" || -z $compression ]]; then
+                compression="$current_compression"
+            fi
         fi
     done
 
@@ -1083,9 +1344,9 @@ test_tls_tolerance() {
         # cipher string and no options are specified)
         #
         local sslcommand="$TIMEOUTBIN $TIMEOUT $OPENSSLBIN s_client"
-        if [ -n "$CAPATH" ]; then
+        if [[ -n "$CAPATH" ]]; then
             sslcommand+=" -CApath $CAPATH -showcerts"
-        elif [ -e "$CACERTS" ]; then
+        elif [[ -e "$CACERTS" ]]; then
             sslcommand+=" -CAfile $CACERTS"
         fi
         sslcommand+=" -connect $TARGET -cipher $CIPHERSUITE"
@@ -1105,15 +1366,12 @@ test_tls_tolerance() {
         #
         # try a smaller, but still v2 compatible Client Hello
         #
-        OLDIFS="$IFS"
-        IFS=":"
-        local ciphers="${SHORTCIPHERSUITE[*]}"
-        IFS="$OLDIFS"
+        local ciphers="$SHORTCIPHERSUITESTRING"
 
         local sslcommand="$TIMEOUTBIN $TIMEOUT $OPENSSLBIN s_client"
-        if [ -n "$CAPATH" ]; then
+        if [[ -n "$CAPATH" ]]; then
             sslcommand+=" -CApath $CAPATH -showcerts"
-        elif [ -e "$CACERTS" ]; then
+        elif [[ -e "$CACERTS" ]]; then
             sslcommand+=" -CAfile $CACERTS"
         fi
         sslcommand+=" -connect $TARGET -cipher $ciphers"
@@ -1179,15 +1437,12 @@ test_tls_tolerance() {
         #
         # use v3 format TLSv1.2 hello, small cipher list
         #
-        OLDIFS="$IFS"
-        IFS=":"
-        local ciphers="${SHORTCIPHERSUITE[*]}"
-        IFS="$OLDIFS"
+        local ciphers="$SHORTCIPHERSUITESTRING"
 
         local sslcommand="$TIMEOUTBIN $TIMEOUT $OPENSSLBIN s_client"
-        if [ -n "$CAPATH" ]; then
+        if [[ -n "$CAPATH" ]]; then
             sslcommand+=" -CApath $CAPATH -showcerts"
-        elif [ -e "$CACERTS" ]; then
+        elif [[ -e "$CACERTS" ]]; then
             sslcommand+=" -CAfile $CACERTS"
         fi
         sslcommand+=" $SCLIENTARGS -connect $TARGET -cipher $ciphers:!SSLv2"
@@ -1268,9 +1523,320 @@ test_tls_tolerance() {
     fi
 }
 
+test_kex_sigalgs() {
+    local ecdsa_sigalgs=("ECDSA+SHA512" "ECDSA+SHA384" "ECDSA+SHA256"
+        "ECDSA+SHA224" "ECDSA+SHA1" "ECDSA+MD5")
+    local rsa_sigalgs=("RSA+SHA512" "RSA+SHA384" "RSA+SHA256"
+        "RSA+SHA224" "RSA+SHA1" "RSA+MD5")
+
+    local supported_rsa_ciphers=""
+    local supported_ecdsa_ciphers=""
+    local supported_ciphers=()
+
+    # check if TLS1.2 is supported by server, as tests needs it
+    # collect ciphers
+    local tls12="False"
+    for cipher in "${cipherspref[@]}"; do
+        local ciph_data=($cipher)
+        if [[ ${ciph_data[1]} =~ TLSv1.2 ]]; then
+            tls12="True"
+        fi
+        supported_ciphers+=(${ciph_data[0]})
+    done
+
+    if [[ $tls12 == "False" ]]; then
+        return
+    fi
+
+    # create cipher list for ecdsa and rsa tests that include non ephemeral
+    # ciphers for fallback
+    for cipher in "${supported_ciphers[@]}"; do
+        if [[ $cipher =~ DHE-ECDSA ]]; then
+            if [[ $supported_ecdsa_ciphers ]]; then
+                supported_ecdsa_ciphers+=":"
+            fi
+            supported_ecdsa_ciphers+="$cipher"
+        elif [[ ${supported_ecdsa_ciphers} ]]; then
+            supported_ecdsa_ciphers+=":$cipher"
+        fi
+
+        if [[ $cipher =~ DHE-RSA ]]; then
+            if [[ $supported_rsa_ciphers ]]; then
+                supported_rsa_ciphers+=":"
+            fi
+            supported_rsa_ciphers+="$cipher"
+        elif [[ ${supported_rsa_ciphers} ]]; then
+            supported_rsa_ciphers+=":$cipher"
+        fi
+    done
+
+    #
+    # Test default sigalgs for aECDSA ciphers
+    #
+    if [[ $supported_ecdsa_ciphers ]]; then
+        local sslcommand="$TIMEOUTBIN $TIMEOUT $OPENSSLBIN s_client"
+        if [ -n "$CAPATH" ]; then
+            sslcommand+=" -CApath $CAPATH -showcerts"
+        elif [ -e "$CACERTS" ]; then
+            sslcommand+=" -CAfile $CACERTS"
+        fi
+        sslcommand+=" $SCLIENTARGS -connect $TARGET -cipher $supported_ecdsa_ciphers"
+        # since some ciphers supported by server may be SSLv2 only, we need to
+        # force use of TLSv1.2, otherwise openssl will send a SSLv2 compatible
+        # client hello
+        sslcommand+=" -no_ssl2 -no_ssl3"
+        local test_ecdsa_sigalgs=("${ecdsa_sigalgs[@]}")
+        local test_rsa_sigalgs=("${rsa_sigalgs[@]}")
+
+        while true; do
+            join_array_by_char ":" "${test_ecdsa_sigalgs[@]}" \
+                "${test_rsa_sigalgs[@]}"
+            local test_sigalgs="$joined_array"
+
+            ratelimit
+            verbose "Testing default ECDSA sig algs with $sslcommand -sigalgs $test_sigalgs"
+            local tmp=$(echo Q | $sslcommand -sigalgs $test_sigalgs 2>/dev/null)
+            parse_openssl_output <<<"$tmp"
+            verbose "server selected $current_cipher, $current_protocol, $current_kex_sigalg"
+            if [[ -z $current_protocol || $current_cipher == "(NONE)" \
+                || $current_cipher == "0000" ]]; then
+                    if [[ ${#test_ecdsa_sigalgs[@]} -eq 0 ]]; then
+                        sigalgs_fallback["ECDSA"]="False"
+                    else
+                        sigalgs_fallback["ECDSA"]="intolerant"
+                    fi
+                    break
+            fi
+
+            if [[ $current_cipher =~ DHE-ECDSA ]]; then
+                if [[ -z $current_kex_sigalg ]]; then
+                    # if we didn't get a sigalg that means the test failed
+                    sigalgs_preferred_ecdsa=("Fail")
+                    break
+                fi
+
+                if [[ "${test_ecdsa_sigalgs[*]}" =~ "ECDSA+$current_kex_sigalg" ]]; then
+                    # save sigalg for reporting
+                    sigalgs_preferred_ecdsa+=("$current_kex_sigalg")
+
+                    # remove it from offered
+                    local id
+                    for id in "${!test_ecdsa_sigalgs[@]}"; do
+                        if [[ ${test_ecdsa_sigalgs[$id]} =~ $current_kex_sigalg ]]; then
+                            unset test_ecdsa_sigalgs[$id]
+                            break
+                        fi
+                    done
+                    # continue testing
+                else
+                    # server selected sigalg we didn't offer
+                    sigalgs_fallback["ECDSA"]="$current_kex_sigalg"
+                    break
+                fi
+            elif [[ $current_cipher =~ DHE-RSA ]]; then
+                # we got a fallback to a RSA based cipher
+                if [[ -z $current_kex_sigalg ]]; then
+                    sigalgs_fallback["ECDSA"]="pfs-rsa"
+                else
+                    sigalgs_fallback["ECDSA"]="pfs-rsa-${current_kex_sigalg}"
+                fi
+                break
+            else
+                # we got a fallback to a non PFS cipher, that's good too
+                sigalgs_fallback["ECDSA"]="soft-nopfs"
+                break
+            fi
+            [ "$OUTPUTFORMAT" == "terminal" ] && [ $DEBUG -lt 1 ] && echo -n '.'
+        done
+    fi
+
+    #
+    # Test default sigalgs for aRSA ciphers
+    #
+    if [[ ${supported_rsa_ciphers} ]]; then
+        local sslcommand="$TIMEOUTBIN $TIMEOUT $OPENSSLBIN s_client"
+        if [ -n "$CAPATH" ]; then
+            sslcommand+=" -CApath $CAPATH -showcerts"
+        elif [ -e "$CACERTS" ]; then
+            sslcommand+=" -CAfile $CACERTS"
+        fi
+        sslcommand+=" $SCLIENTARGS -connect $TARGET -cipher $supported_rsa_ciphers"
+        # since some ciphers supported by server may be SSLv2 only, we need to
+        # force use of TLSv1.2, otherwise openssl will send a SSLv2 compatible
+        # client hello
+        sslcommand+=" -no_ssl2 -no_ssl3"
+        local test_ecdsa_sigalgs=("${ecdsa_sigalgs[@]}")
+        local test_rsa_sigalgs=("${rsa_sigalgs[@]}")
+
+        while true; do
+            join_array_by_char ":" "${test_rsa_sigalgs[@]}" \
+                "${test_ecdsa_sigalgs[@]}"
+            local test_sigalgs="$joined_array"
+
+            ratelimit
+            verbose "Testing default RSA sig algs with $sslcommand -sigalgs $test_sigalgs"
+            local tmp=$(echo Q | $sslcommand -sigalgs $test_sigalgs 2>/dev/null)
+            parse_openssl_output <<<"$tmp"
+            verbose "server selected $current_cipher, $current_protocol, $current_kex_sigalg"
+            if [[ -z $current_protocol || $current_cipher == "(NONE)" \
+                || $current_cipher == "0000" ]]; then
+                    if [[ ${#test_rsa_sigalgs[@]} -eq 0 ]]; then
+                        sigalgs_fallback["RSA"]="False"
+                    else
+                        sigalgs_fallback["RSA"]="intolerant"
+                    fi
+                    break
+            fi
+
+            if [[ $current_cipher =~ DHE-RSA ]]; then
+                if [[ -z $current_kex_sigalg ]]; then
+                    # if we didn't get a sigalg that means the test failed
+                    sigalgs_preferred_rsa=("Fail")
+                    break
+                fi
+
+                if [[ "${test_rsa_sigalgs[*]}" =~ "RSA+$current_kex_sigalg" ]]; then
+                    # save sigalg for reporting
+                    sigalgs_preferred_rsa+=("$current_kex_sigalg")
+
+                    # remove it from offered
+                    local id
+                    for id in "${!test_rsa_sigalgs[@]}"; do
+                        if [[ ${test_rsa_sigalgs[$id]} =~ $current_kex_sigalg ]]; then
+                            unset test_rsa_sigalgs[$id]
+                            break
+                        fi
+                    done
+                    # continue testing
+                else
+                    # server selected sigalg we didn't offer
+                    sigalgs_fallback["RSA"]="$current_kex_sigalg"
+                    break
+                fi
+            elif [[ $current_cipher =~ DHE-ECDSA ]]; then
+                # we got a fallback to an ECDSA based cipher
+                if [[ -z $current_kex_sigalg ]]; then
+                    sigalgs_fallback["RSA"]="pfs-ecdsa"
+                else
+                    sigalgs_fallback["RSA"]="pfs-ecdsa-${current_kex_sigalg}"
+                fi
+                break
+            else
+                # we got a fallback to a non PFS cipher, that's good too
+                sigalgs_fallback["RSA"]="soft-nopfs"
+                break
+            fi
+            [ "$OUTPUTFORMAT" == "terminal" ] && [ $DEBUG -lt 1 ] && echo -n '.'
+        done
+    fi
+
+    #
+    # test which ordering is preferred, server or client
+    #
+    if [[ ${#sigalgs_preferred_rsa[@]} -eq 0 \
+        && ${#sigalgs_preferred_ecdsa[@]} -eq 0 ]]; then
+        sigalgs_ordering="unsupported"
+    elif [[ ${#sigalgs_preferred_rsa[@]} -le 1 \
+        && ${#sigalgs_preferred_ecdsa[@]} -le 1 ]]; then
+        # if there is just one hash for each signature algorithm, that means
+        # the server essentially forces the signature algorithm on client
+        sigalgs_ordering="server"
+    elif [[ ${#sigalgs_preferred_ecdsa[@]} -gt 1 ]]; then
+        # in case server supports multiple ECDSA sigalgs, test just those,
+        # even if it supports RSA (since those are more important)
+
+        # completely rotate order check if negotiated changes
+        local test_sigalgs=""
+        local i
+        for ((i=${#sigalgs_preferred_ecdsa[@]}-1; i>0; i--)); do
+            test_sigalgs+="ECDSA+${sigalgs_preferred_ecdsa[$i]}:"
+        done
+        test_sigalgs+="ECDSA+${sigalgs_preferred_ecdsa[0]}"
+
+        # prepare the command to run
+        local sslcommand="$TIMEOUTBIN $TIMEOUT $OPENSSLBIN s_client"
+        if [ -n "$CAPATH" ]; then
+            sslcommand+=" -CApath $CAPATH -showcerts"
+        elif [ -e "$CACERTS" ]; then
+            sslcommand+=" -CAfile $CACERTS"
+        fi
+        sslcommand+=" $SCLIENTARGS -connect $TARGET -cipher $supported_ecdsa_ciphers"
+        # since some ciphers supported by server may be SSLv2 only, we need to
+        # force use of TLSv1.2, otherwise openssl will send a SSLv2 compatible
+        # client hello
+        sslcommand+=" -no_ssl2 -no_ssl3"
+
+        ratelimit
+        verbose "Test ordering of sigalgs with $sslcommand -sigalgs $test_sigalgs"
+        local tmp=$(echo Q | $sslcommand -sigalgs $test_sigalgs 2>/dev/null)
+        parse_openssl_output <<<"$tmp"
+        verbose "server selected $current_cipher, $current_protocol, $current_kex_sigalg"
+        if [[ -z $current_protocol || $current_cipher == "(NONE)" \
+            || $current_cipher == "0000" ]]; then
+            sigalgs_ordering="intolerant"
+        elif [[ -z $current_kex_sigalg ]] || [[ ! $current_cipher =~ DHE-ECDSA ]]; then
+            sigalgs_ordering="order-fallback"
+        else
+            if [[ ${sigalgs_preferred_ecdsa[0]} == $current_kex_sigalg ]]; then
+                sigalgs_ordering="server"
+            elif [[ ${sigalgs_preferred_ecdsa[${#sigalgs_preferred_ecdsa[@]}-1]} \
+                == $current_kex_sigalg ]]; then
+                sigalgs_ordering="client"
+            else
+                sigalgs_ordering="indeterminate"
+            fi
+        fi
+    else
+        # test ordering with RSA ciphers
+
+        # completely rotate order check if negotiated changes
+        local test_sigalgs=""
+        local i
+        for ((i=${#sigalgs_preferred_rsa[@]}-1; i>0; i--)); do
+            test_sigalgs+="RSA+${sigalgs_preferred_rsa[$i]}:"
+        done
+        test_sigalgs+="RSA+${sigalgs_preferred_rsa[0]}"
+
+        # prepare the command to run
+        local sslcommand="$TIMEOUTBIN $TIMEOUT $OPENSSLBIN s_client"
+        if [ -n "$CAPATH" ]; then
+            sslcommand+=" -CApath $CAPATH -showcerts"
+        elif [ -e "$CACERTS" ]; then
+            sslcommand+=" -CAfile $CACERTS"
+        fi
+        sslcommand+=" $SCLIENTARGS -connect $TARGET -cipher $supported_rsa_ciphers"
+        # since some ciphers supported by server may be SSLv2 only, we need to
+        # force use of TLSv1.2, otherwise openssl will send a SSLv2 compatible
+        # client hello
+        sslcommand+=" -no_ssl2 -no_ssl3"
+
+        ratelimit
+        verbose "Test ordering of sigalgs with $sslcommand -sigalgs $test_sigalgs"
+        local tmp=$(echo Q | $sslcommand -sigalgs $test_sigalgs 2>/dev/null)
+        parse_openssl_output <<<"$tmp"
+        verbose "server selected $current_cipher, $current_protocol, $current_kex_sigalg"
+        if [[ -z $current_protocol || $current_cipher == "(NONE)" \
+            || $current_cipher == "0000" ]]; then
+            sigalgs_ordering="intolerant"
+        elif [[ -z $current_kex_sigalg ]] || [[ ! $current_cipher =~ DHE-RSA ]]; then
+            sigalgs_ordering="order-fallback"
+        else
+            if [[ ${sigalgs_preferred_rsa[0]} == $current_kex_sigalg ]]; then
+                sigalgs_ordering="server"
+            elif [[ ${sigalgs_preferred_rsa[${#sigalgs_preferred_rsa[@]}-1]} \
+                == $current_kex_sigalg ]]; then
+                sigalgs_ordering="client"
+            else
+                sigalgs_ordering="indeterminate"
+            fi
+        fi
+    fi
+
+}
+
 # If no options are given, give usage information and exit (with error code)
-if [ $# -eq 0 ]; then
-   usage;
+if (( $# == 0 )); then
+   usage
    exit 1
 fi
 
@@ -1311,6 +1877,12 @@ do
             DELAY=$2
             shift 2
             ;;
+        --cafile)
+            CACERTS="$2"
+            shift 2
+            # We need to bypass autodetection if this is provided.
+            CACERTS_ARG_SET=1
+            ;;
         --capath)
             CAPATH="$2"
             shift 2
@@ -1331,6 +1903,30 @@ do
             TEST_CURVES="False"
             shift 1
             ;;
+        --sigalg)
+            TEST_KEX_SIGALG="True"
+            shift 1
+            ;;
+        --tolerance)
+            TEST_TOLERANCE="True"
+            shift 1
+            ;;
+        --no-tolerance)
+            TEST_TOLERANCE="False"
+            shift 1
+            ;;
+        --colors)
+            USECOLORS="True"
+            shift 1
+            ;;
+        --no-colors)
+            USECOLORS="False"
+            shift 1
+            ;;
+        --no-sni)
+            SNI="False"
+            shift 1
+            ;;
         --) # End of all options
             shift
             break
@@ -1346,49 +1942,146 @@ do
     esac
 done
 
-# echo parameters left: $@
-
-TEMPTARGET=$(sed -e 's/^.* //'<<<"${@}")
-HOST=$(sed -e 's/:.*//'<<<"${TEMPTARGET}")
-PORT=$(sed -e 's/.*://'<<<"${TEMPTARGET}")
-
-# Default to https if no port given
-if [ "$HOST" = "$PORT" ]; then
-    PORT=443
+if [[ -z $OPENSSLBIN ]]; then
+    readlink_result=$("$READLINKBIN" -f "$0")
+    if [[ -z $readlink_result ]]; then
+        echo "$READLINKBIN -f $0 failed, aborting." 1>&2
+        exit 1
+    fi
+    REALPATH=$(dirname "$readlink_result")
+    if [[ -z $REALPATH ]]; then
+        echo "dirname $REALPATH failed, aborting." 1>&2
+        exit 1
+    fi
+    OPENSSLBIN="${REALPATH}/${opensslbin_name}"
+    if ! [[ -x "${OPENSSLBIN}" ]]; then
+        OPENSSLBIN="$(which openssl)"  # fallback to generic openssl
+    fi
+fi
+# use custom config file to enable GOST ciphers
+if [[ -e $DIRNAMEPATH/openssl.cnf ]]; then
+    export OPENSSL_CONF="$DIRNAMEPATH/openssl.cnf"
 fi
 
-debug "host: $HOST"
-debug "Port: $PORT"
+OPENSSLBINHELP="$($OPENSSLBIN s_client -help 2>&1)"
+if [[ $OPENSSLBINHELP =~ :error: ]]; then
+    verbose "$OPENSSLBIN can't handle GOST config, disabling"
+    unset OPENSSL_CONF
+    OPENSSLBINHELP="$($OPENSSLBIN s_client -help 2>&1)"
+fi
 
-TARGET=$HOST:$PORT
-debug "target: $TARGET"
+if ! [[ $OPENSSLBINHELP =~ -connect ]]; then
+    echo "$OPENSSLBIN s_client doesn't accept the -connect parameter, which is extremely strange; refusing to proceed." 1>&2
+    exit 1
+fi
 
-# test our openssl is usable
-if [ ! -x $OPENSSLBIN ]; then
-    OPENSSLBIN=$(which openssl)
-    if [ "$OUTPUTFORMAT" == "terminal" ]; then
-        echo "custom openssl not executable, falling back to system one from $OPENSSLBIN"
+if [[ -n $CAPATH && -n $CACERTS ]]; then
+    echo "Both directory and file with CA certificates specified" 1>&2
+    exit 1
+fi
+
+if [[ -n $ALLCIPHERS && $OUTPUTFORMAT == "json" ]]; then
+    echo "--allciphers cannot produce JSON output, aborting." 1>&2
+    exit 1
+fi
+
+# echo parameters left: $@
+
+if (( $# < 1 )); then
+    echo "The final argument must be a valid HOST[:PORT], but none was provided." 1>&2
+    exit 1
+fi
+
+PARAMS=("$@")
+last_element="$(( $# - 1 ))"
+TARGET=${PARAMS[$last_element]}
+unset PARAMS[$last_element]
+
+# Refuse to proceed if the hostname starts with a hyphen, since hostnames can't
+# begin with a hyphen and this likely means we accidentally parsed an option as
+# a hostname.
+if [[ -z $TARGET || $TARGET =~ ^[-:] ]]; then
+    echo "The final argument '$TARGET' is not a valid HOST[:PORT]." 1>&2
+    exit 1
+fi
+# Handle Targets that are URIs
+if [[ $TARGET =~ /([^/]+)(/|$) ]]; then
+    TARGET="${BASH_REMATCH[1]}"
+fi
+if [[ $TARGET =~ :.*[^0-9] ]]; then
+    echo "Final argument is not a valid HOST[:PORT]" >&2
+    exit 1
+fi
+if ! [[ $TARGET =~ : ]]; then
+    sni_target=$TARGET
+    TARGET="${TARGET}:443"
+else
+    # strip the port for the sni_target
+    if [[ "$TARGET" =~ (.*):([0-9]{1,5}) ]]; then
+        sni_target="${BASH_REMATCH[1]}"
     fi
 fi
 
-if [ $TEST_CURVES == "True" ]; then
-    if [ ! -z "$($OPENSSLBIN s_client -curves 2>&1|head -1|grep 'unknown option')" ]; then
-        echo "curves testing not available with your version of openssl, disabling it"
+debug "target: $TARGET"
+
+# test our openssl is usable
+if [[ ! -x $OPENSSLBIN ]]; then
+    OPENSSLBIN=$(which openssl)
+    if [[ "$OUTPUTFORMAT" == "terminal" ]]; then
+        echo "custom openssl not executable, falling back to system one from $OPENSSLBIN" 1>&2
+    fi
+fi
+
+if [[ $TEST_CURVES == "True" ]]; then
+    if [[ ! -z "$($OPENSSLBIN s_client -curves 2>&1|head -1|grep 'unknown option')" ]]; then
+        echo "curves testing not available with your version of openssl, disabling it" 1>&2
         TEST_CURVES="False"
     fi
 fi
 
-if [ $VERBOSE != 0 ] ; then
-    [ -n "$CACERTS" ] && echo "Using trust anchors from $CACERTS"
+if [[ -z $CACERTS ]] && ! [[ -n $CACERTS_ARG_SET ]]; then
+    # find a list of trusted CAs on the local system, or use the provided list
+    for f in /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt; do
+        if [[ -e "$f" ]]; then
+            CACERTS="$f"
+            break
+        fi
+    done
+    if [[ ! -e "$CACERTS" ]]; then
+        CACERTS="$DIRNAMEPATH/ca-bundle.crt"
+    fi
+fi
+if ! [[ -e $CACERTS && -r $CACERTS ]]; then
+    echo "--cafile $CACERTS is not a readable file, aborting." 1>&2
+    exit 1
+fi
+
+if [[ -n $CAPATH ]] && ! [[ -d $CAPATH ]]; then
+    echo "--capath $CAPATH is not a directory, aborting." 1>&2
+    exit 1
+fi
+
+if [[ $VERBOSE != 0 ]] ; then
+    [[ -n "$CACERTS" ]] && echo "Using trust anchors from $CACERTS"
     echo "Loading $($OPENSSLBIN ciphers -v $CIPHERSUITE 2>/dev/null|grep Kx|wc -l) ciphersuites from $(echo -n $($OPENSSLBIN version 2>/dev/null))"
          $OPENSSLBIN ciphers ALL 2>/dev/null
 fi
 
-SCLIENTARGS=$(sed -e s,${TEMPTARGET},,<<<"${@}")
+SCLIENTARGS="${PARAMS[*]}"
+# only append the SNI:
+# if the target is a hostname by validating the tld
+# if -servername was not supplied by the user
+if [[ $SNI == "True"  && ! $SCLIENTARGS =~ servername ]]; then
+    if [[ $sni_target =~ \.[a-zA-Z]{1,20}$ ]]; then
+        SCLIENTARGS="$SCLIENTARGS -servername $sni_target"
+    else
+        echo "Warning: target is not a FQDN. SNI was disabled. Use a FQDN or '-servername <fqdn>'" 1>&2
+    fi
+fi
 debug "sclientargs: $SCLIENTARGS"
 
 
-cipherspref=();
+cipherspref=()
 ciphercertificates=()
 results=()
 
@@ -1400,26 +2093,28 @@ get_cipher_pref $CIPHERSUITE
 # do that either when the normal scan returns no ciphers or just SSLv2
 # ciphers (where it's likely that the limiting by OpenSSL worked)
 pref=(${cipherspref[0]})
-if [[ ${#cipherspref[@]} -eq 0 ]] || [[ ${pref[1]} == "SSLv2" ]]; then
+if (( ${#cipherspref[@]} == 0 )) || [[ ${pref[1]} == "SSLv2" ]]; then
     cipherspref=()
     ciphercertificates=()
     results=()
-    OLDIFS="$IFS"
-    IFS=":"
-    CIPHERS="${FALLBACKCIPHERSUITE[*]}"
-    IFS="$OLDIFS"
-    get_cipher_pref "$CIPHERS"
+    get_cipher_pref "$FALLBACKCIPHERSUITESTRING"
 fi
 
-test_tls_tolerance
+if [[ $TEST_TOLERANCE == "True" ]]; then
+    test_tls_tolerance
+fi
 
 test_serverside_ordering
+
+if [[ $TEST_KEX_SIGALG == "True" ]]; then
+    test_kex_sigalgs
+fi
 
 if [[ $TEST_CURVES == "True" ]]; then
     test_curves_fallback
 fi
 
-if [ "$OUTPUTFORMAT" == "json" ]; then
+if [[ "$OUTPUTFORMAT" == "json" ]]; then
     display_results_in_json
 else
     echo
@@ -1427,15 +2122,15 @@ else
 fi
 
 # If asked, test every single cipher individually
-if [ $ALLCIPHERS -gt 0 ]; then
+if [[ -n $ALLCIPHERS ]]; then
     echo; echo "All accepted ciphersuites"
-    for c in $($OPENSSLBIN ciphers -v ALL:COMPLEMENTOFALL 2>/dev/null |awk '{print $1}'|sort|uniq); do
-        r="fail"
+    for c in $($OPENSSLBIN ciphers -v ALL:COMPLEMENTOFALL 2>/dev/null |awk '{print $1}'|sort -u); do
         osslcommand="$TIMEOUTBIN $TIMEOUT $OPENSSLBIN s_client $SCLIENTARGS -connect $TARGET -cipher $c"
-        test_cipher_on_target "$osslcommand"
-        if [ $? -eq 0 ]; then
+        if test_cipher_on_target "$osslcommand"; then
             r="pass"
+        else
+            r="fail"
         fi
-        echo "$c $r"|awk '{printf "%-35s %s\n",$1,$2}'
+        printf "%-35s %s\n" "$c" "$r"
     done
 fi
