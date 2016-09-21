@@ -377,6 +377,7 @@ parse_openssl_output() {
     current_sigalg="None"
     current_renegotiation="False"
     current_compression=""
+    current_npn="None"
 
     certs_found=0
     current_raw_certificates=()
@@ -396,6 +397,12 @@ parse_openssl_output() {
                     break
                 fi
             done
+            continue
+        fi
+
+        # get NPN protocols
+        if [[ $line =~ Protocols\ advertised\ by\ server:\ (.*) ]]; then
+            current_npn="${BASH_REMATCH[1]// /}"
             continue
         fi
 
@@ -564,7 +571,8 @@ test_cipher_on_target() {
             # signed ones)
             local saved="False"
             if ${OPENSSLBIN} verify "${trust_source[@]}" \
-                -untrusted <(printf "%s" "${current_raw_certificates[@]}") <(echo "$cert") 2>/dev/null | \
+                -untrusted <(printf "%s" "${current_raw_certificates[@]}") \
+                <(echo "$cert") 2>/dev/null | \
                 grep ': OK$' >/dev/null; then
 
                 # if the certificate is an intermediate CA it may be useful
@@ -619,6 +627,7 @@ test_cipher_on_target() {
         trusted=$current_trusted
         tickethint=$current_tickethint
         ocspstaple=$current_ocspstaple
+        npn="$current_npn"
         certificates="$current_certificates"
         # grab the cipher and PFS key size
     done
@@ -631,7 +640,7 @@ test_cipher_on_target() {
 
     # if cipher contains NONE, the cipher wasn't accepted
     elif [[ "$cipher" == '(NONE)  ' ]]; then
-        result="$cipher $protocols $pubkey $sigalg $trusted $tickethint $ocspstaple $pfs $current_curves $curves_ordering"
+        result="$cipher $protocols $pubkey $sigalg $trusted $tickethint $ocspstaple $npn $pfs $current_curves $curves_ordering"
         verbose "handshake failed, server returned ciphersuite '$result'"
         return 1
 
@@ -652,7 +661,7 @@ test_cipher_on_target() {
                 current_curves="$(get_curve_name "$(echo $pfs|cut -d ',' -f2)")"
             fi
         fi
-        result="$cipher $protocols $pubkey $sigalg $trusted $tickethint $ocspstaple $pfs $current_curves $curves_ordering"
+        result="$cipher $protocols $pubkey $sigalg $trusted $tickethint $ocspstaple $npn $pfs $current_curves $curves_ordering"
         verbose "handshake succeeded, server returned ciphersuite '$result'"
         return 0
     fi
@@ -661,7 +670,8 @@ test_cipher_on_target() {
 # Calculate the average handshake time for a specific ciphersuite
 bench_cipher() {
     local ciphersuite="$1"
-    local sslcommand="$TIMEOUTBIN $TIMEOUT $OPENSSLBIN s_client $SCLIENTARGS -connect $TARGET -cipher $ciphersuite"
+    local sslcommand="$TIMEOUTBIN $TIMEOUT $OPENSSLBIN s_client $SCLIENTARGS"
+    sslcommand+=" -connect $TARGET -cipher $ciphersuite"
     local t="$(date +%s%N)"
     verbose "Benchmarking handshake on '$TARGET' with ciphersuite '$ciphersuite'"
     for i in $(seq 1 $BENCHMARKITER); do
@@ -690,7 +700,8 @@ get_cipher_pref() {
     elif [[ -e $CACERTS ]]; then
         sslcommand+=" -CAfile $CACERTS"
     fi
-    sslcommand+=" -status $SCLIENTARGS -connect $TARGET -cipher $ciphersuite"
+    sslcommand+=" -trusted_first -status $SCLIENTARGS -connect $TARGET"
+    sslcommand+=" -cipher $ciphersuite -nextprotoneg http/1.1"
 
     verbose "Connecting to '$TARGET' with ciphersuite '$ciphersuite'"
     # If the connection succeeded with the current cipher, benchmark and store
@@ -725,6 +736,7 @@ display_results_in_terminal() {
     local sigalg
     local trusted
     local tickethint
+    local npn
     local ocspstaple
     local curvesordering
     local different=False
@@ -762,13 +774,15 @@ display_results_in_terminal() {
         fi
         local cipher_data=($cipher)
         if [[ $ctr -eq 1 ]]; then
+            cipher="${cipher_data[1]}"
             pubkey="${cipher_data[2]}"
             sigalg="${cipher_data[3]}"
             trusted="${cipher_data[4]}"
             tickethint="${cipher_data[5]}"
             ocspstaple="${cipher_data[6]}"
-            if [[ $TEST_CURVES == "True" && -n ${cipher_data[9]} ]]; then
-                curvesordering="${cipher_data[9]}"
+            npn="${cipher_data[7]}"
+            if [[ $TEST_CURVES == "True" && -n ${cipher_data[10]} ]]; then
+                curvesordering="${cipher_data[10]}"
             fi
         else
             if [[ "$pubkey" != "${cipher_data[2]}" ]]; then
@@ -786,10 +800,14 @@ display_results_in_terminal() {
             if [[ "$ocspstaple" != "${cipher_data[6]}" ]]; then
                 different=True
             fi
-            if [[ -z $curvesordering && -n "${cipher_data[9]}" ]]; then
-                curvesordering="${cipher_data[9]}"
+            if [[ "$npn" != "${cipher_data[7]}" ]]; then
+                different=True
             fi
-            if [[ -n $curvesordering && "$curvesordering" != "${cipher_data[9]}" ]]; then
+            if [[ -z $curvesordering && -n "${cipher_data[10]}" ]]; then
+                curvesordering="${cipher_data[10]}"
+            fi
+            if [[ -n $curvesordering && "$curvesordering" != "${cipher_data[10]}" ]]; then
+                echo "CURVESORDERING"
                 different=True
             fi
         fi
@@ -799,7 +817,7 @@ display_results_in_terminal() {
 
     header="prio ciphersuite protocols"
     if [[ $different == "True" ]]; then
-        header+=" pubkey_size signature_algoritm trusted ticket_hint ocsp_staple"
+        header+=" pubkey_size signature_algoritm trusted ticket_hint ocsp_staple npn"
     fi
     header+=" pfs"
     if [[ $has_curves == "True" ]]; then
@@ -821,12 +839,12 @@ display_results_in_terminal() {
             echo "$result"|grep -v '(NONE)'
         else
             # prints priority, ciphersuite, protocols and pfs
-            awk '!/(NONE)/{print $1 " " $2 " " $3 " " $9 " " $10}' <<<"$result"
+            awk '!/(NONE)/{print $1 " " $2 " " $3 " " $10 " " $11}' <<<"$result"
         fi
     done|column -t
     echo
     
-    if [[ ($sigalg =~ RSA && $pubkey -ge 2047) || ($sigalg =~ ECDSA && $pubkey -gt 255) ]]; then
+    if [[ ($sigalg =~ RSA && $pubkey -ge 2047) || ($cipher =~ ECDSA && $pubkey -gt 255) ]]; then
         pubkey="${c_green}${pubkey}${c_reset}"
     else
         pubkey="${c_red}${pubkey}${c_reset}"
@@ -844,6 +862,7 @@ display_results_in_terminal() {
     if [[ $different != "True" ]]; then
         echo -e "Certificate: $trusted, $pubkey bits, $sigalg signature"
         echo "TLS ticket lifetime hint: $tickethint"
+        echo "NPN protocols: $npn"
     fi
     if [[ $ocspstaple == "True" ]]; then
         echo -e "OCSP stapling: ${c_green}supported${c_reset}"
@@ -980,15 +999,16 @@ display_results_in_json() {
         fi
         echo -n "\"ticket_hint\":\"${cipher_arr[5]}\","
         echo -n "\"ocsp_stapling\":\"${cipher_arr[6]}\","
-        pfs="${cipher_arr[7]}"
+        echo -n "\"npn\":[\"${cipher_arr[7]//,/\",\"}\"],"
+        pfs="${cipher_arr[8]}"
         [[ -z $pfs ]] && pfs="None"
         echo -n "\"pfs\":\"$pfs\""
         if [[ "${cipher_arr[0]}" =~ ECDH ]]; then
             echo -n ","
-            echo -n "\"curves\":[\"${cipher_arr[8]//,/\",\"}\"]"
+            echo -n "\"curves\":[\"${cipher_arr[9]//,/\",\"}\"]"
             if [[ $TEST_CURVES == "True" ]]; then
                 echo -n ","
-                echo -n "\"curves_ordering\":\"${cipher_arr[9]}\""
+                echo -n "\"curves_ordering\":\"${cipher_arr[10]}\""
             fi
         fi
         echo -n "}"
@@ -1094,7 +1114,8 @@ test_serverside_ordering() {
     elif [[ -e "$CACERTS" ]]; then
         sslcommand+=" -CAfile $CACERTS"
     fi
-    sslcommand+=" -status $SCLIENTARGS -connect $TARGET -cipher $ciphersuite"
+    sslcommand+=" -trusted_first -status $SCLIENTARGS -connect $TARGET"
+    sslcommand+=" -cipher $ciphersuite"
 
     test_cipher_on_target "$sslcommand"
     if (( $? != 0 )); then
@@ -1129,6 +1150,7 @@ test_curves() {
         sslcommand+=" -CAfile $CACERTS"
     fi
     sslcommand+=" -status $SCLIENTARGS -connect $TARGET -cipher $current_cipher"
+    sslcommand+=" -trusted_first"
     # force the TLS to send a TLS1.0 client hello at least, as with SSLv2
     # ciphers present it will try to send a SSLv2 compatible client hello
     sslcommand+=" -no_ssl2 -no_ssl3"
@@ -1247,6 +1269,7 @@ test_curves_fallback() {
     elif [[ -e "$CACERTS" ]]; then
         sslcommand+=" -CAfile $CACERTS"
     fi
+    sslcommand+=" -trusted_first"
     sslcommand+=" -status $SCLIENTARGS -connect $TARGET -cipher $ecc_ciphers"
     # force the TLS to send a TLS1.0 client hello at least, as with SSLv2
     # ciphers present it will try to send a SSLv2 compatible client hello
@@ -1309,7 +1332,12 @@ test_tls_tolerance() {
     tls_vers_tests['big-SSLv3']="-no_tls1_2 -no_tls1_1 -no_tls1"
 
     local sslcommand="$TIMEOUTBIN $TIMEOUT $OPENSSLBIN s_client"
-    sslcommand+=" -status -nextprotoneg 'http/1.1'"
+    if [ -n "$CAPATH" ]; then
+        sslcommand+=" -CApath $CAPATH -showcerts"
+    elif [ -e "$CACERTS" ]; then
+        sslcommand+=" -CAfile $CACERTS"
+    fi
+    sslcommand+=" -trusted_first -status -nextprotoneg 'http/1.1'"
     sslcommand+=" $SCLIENTARGS -connect $TARGET -cipher $CIPHERSUITE"
 
     for version in "${!tls_vers_tests[@]}"; do
@@ -1349,7 +1377,7 @@ test_tls_tolerance() {
         elif [[ -e "$CACERTS" ]]; then
             sslcommand+=" -CAfile $CACERTS"
         fi
-        sslcommand+=" -connect $TARGET -cipher $CIPHERSUITE"
+        sslcommand+=" -trusted_first -connect $TARGET -cipher $CIPHERSUITE"
 
         ratelimit
         verbose "Testing fallback with $sslcommand"
@@ -1374,7 +1402,7 @@ test_tls_tolerance() {
         elif [[ -e "$CACERTS" ]]; then
             sslcommand+=" -CAfile $CACERTS"
         fi
-        sslcommand+=" -connect $TARGET -cipher $ciphers"
+        sslcommand+=" -trusted_first -connect $TARGET -cipher $ciphers"
 
         ratelimit
         verbose "Testing fallback with $sslcommand"
@@ -1445,6 +1473,7 @@ test_tls_tolerance() {
         elif [[ -e "$CACERTS" ]]; then
             sslcommand+=" -CAfile $CACERTS"
         fi
+        sslcommand+=" -trusted_first"
         sslcommand+=" $SCLIENTARGS -connect $TARGET -cipher $ciphers:!SSLv2"
 
         ratelimit
@@ -1580,7 +1609,8 @@ test_kex_sigalgs() {
         elif [ -e "$CACERTS" ]; then
             sslcommand+=" -CAfile $CACERTS"
         fi
-        sslcommand+=" $SCLIENTARGS -connect $TARGET -cipher $supported_ecdsa_ciphers"
+        sslcommand+=" -trusted_first $SCLIENTARGS -connect $TARGET"
+        sslcommand+=" -cipher $supported_ecdsa_ciphers"
         # since some ciphers supported by server may be SSLv2 only, we need to
         # force use of TLSv1.2, otherwise openssl will send a SSLv2 compatible
         # client hello
@@ -1660,7 +1690,8 @@ test_kex_sigalgs() {
         elif [ -e "$CACERTS" ]; then
             sslcommand+=" -CAfile $CACERTS"
         fi
-        sslcommand+=" $SCLIENTARGS -connect $TARGET -cipher $supported_rsa_ciphers"
+        sslcommand+=" -trusted_first $SCLIENTARGS -connect $TARGET"
+        sslcommand+=" -cipher $supported_rsa_ciphers"
         # since some ciphers supported by server may be SSLv2 only, we need to
         # force use of TLSv1.2, otherwise openssl will send a SSLv2 compatible
         # client hello
@@ -1760,7 +1791,8 @@ test_kex_sigalgs() {
         elif [ -e "$CACERTS" ]; then
             sslcommand+=" -CAfile $CACERTS"
         fi
-        sslcommand+=" $SCLIENTARGS -connect $TARGET -cipher $supported_ecdsa_ciphers"
+        sslcommand+=" -trusted_first $SCLIENTARGS -connect $TARGET"
+        sslcommand+=" -cipher $supported_ecdsa_ciphers"
         # since some ciphers supported by server may be SSLv2 only, we need to
         # force use of TLSv1.2, otherwise openssl will send a SSLv2 compatible
         # client hello
@@ -1804,7 +1836,8 @@ test_kex_sigalgs() {
         elif [ -e "$CACERTS" ]; then
             sslcommand+=" -CAfile $CACERTS"
         fi
-        sslcommand+=" $SCLIENTARGS -connect $TARGET -cipher $supported_rsa_ciphers"
+        sslcommand+=" -trusted_first $SCLIENTARGS -connect $TARGET"
+        sslcommand+=" -cipher $supported_rsa_ciphers"
         # since some ciphers supported by server may be SSLv2 only, we need to
         # force use of TLSv1.2, otherwise openssl will send a SSLv2 compatible
         # client hello
