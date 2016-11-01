@@ -2028,6 +2028,11 @@ fi
 PARAMS=("$@")
 last_element="$(( $# - 1 ))"
 TARGET=${PARAMS[$last_element]}
+
+mkdir -p ~/.cipherscan
+touch ~/.cipherscan/hosts.log
+[[ $(grep ^$TARGET$ ~/.cipherscan/hosts.log | wc -l | tr '\n' ' ') -eq 1 ]] && echo $TARGET >> ~/.cipherscan/hosts.log
+
 unset PARAMS[$last_element]
 
 # Refuse to proceed if the hostname starts with a hyphen, since hostnames can't
